@@ -1,0 +1,20 @@
+﻿# Flashback source — clone separately, do not commit
+/flashback-source/
+
+# Research / docs — not needed for users (per Rewind remote)
+research/
+docs/
+AGENTS.md
+
+# Large recordings — keep samples only
+recordings/
+!recordings/**/.gitkeep
+
+# Rust build
+/target/
+**/target/
+
+# OS
+.DS_Store
+Thumbs.db
+

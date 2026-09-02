@@ -1,0 +1,25 @@
+[package]
+name = "app"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Standalone desktop application (CLI probe for M0)"
+
+[[bin]]
+name = "flashback-probe"
+path = "src/bin/flashback-probe.rs"
+
+[[bin]]
+name = "flashback-idmap-probe"
+path = "src/bin/flashback-idmap-probe.rs"
+
+[[bin]]
+name = "flashback-canonical-probe"
+path = "src/bin/flashback-canonical-probe.rs"
+
+[dependencies]
+flashback-format = { path = "../flashback-format" }
+minecraft-version = { path = "../minecraft-version" }
+replay-model = { path = "../replay-model" }
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"

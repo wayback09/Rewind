@@ -1,0 +1,16 @@
+[package]
+name = "minecraft-version"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Minecraft-version-specific decoding — BlockState registry and palette expansion for 26.2 (data 4903, proto 776)"
+
+[dependencies]
+flashback-format = { path = "../flashback-format" }
+replay-model = { path = "../replay-model" }
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+thiserror = "1.0"
+
+[dev-dependencies]
+flashback-format = { path = "../flashback-format" }

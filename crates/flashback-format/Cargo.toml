@@ -1,0 +1,15 @@
+[package]
+name = "flashback-format"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Flashback .flashback ZIP container, metadata, chunk, TLV, and chunk-cache parsing (no Minecraft decoding)"
+
+[dependencies]
+serde.workspace = true
+serde_json.workspace = true
+zip.workspace = true
+thiserror.workspace = true
+
+[dev-dependencies]
+serde_json.workspace = true

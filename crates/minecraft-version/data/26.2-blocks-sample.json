@@ -1,0 +1,51 @@
+{
+  "version": "26.2",
+  "data_version": 4903,
+  "protocol_version": 776,
+  "sample": [
+    {
+      "name": "minecraft:air",
+      "properties": {}
+    },
+    {
+      "name": "minecraft:stone",
+      "properties": {}
+    },
+    {
+      "name": "minecraft:granite",
+      "properties": {}
+    },
+    {
+      "name": "minecraft:polished_granite",
+      "properties": {}
+    },
+    {
+      "name": "minecraft:diorite",
+      "properties": {}
+    },
+    {
+      "name": "minecraft:polished_diorite",
+      "properties": {}
+    },
+    {
+      "name": "minecraft:andesite",
+      "properties": {}
+    },
+    {
+      "name": "minecraft:polished_andesite",
+      "properties": {}
+    },
+    {
+      "name": "minecraft:grass_block",
+      "properties": {
+        "snowy": "true"
+      }
+    },
+    {
+      "name": "minecraft:grass_block",
+      "properties": {
+        "snowy": "false"
+      }
+    }
+  ]
+}

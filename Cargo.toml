@@ -1,0 +1,20 @@
+[workspace]
+members = [
+    "crates/flashback-format",
+    "crates/minecraft-version",
+    "crates/replay-model",
+    "crates/app",
+]
+resolver = "2"
+
+[workspace.package]
+edition = "2021"
+version = "0.1.0"
+license = "MIT OR Apache-2.0"
+authors = ["flashback-standalone contributors"]
+
+[workspace.dependencies]
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+zip = { version = "2.2", default-features = false, features = ["deflate"] }
+thiserror = "1.0"
