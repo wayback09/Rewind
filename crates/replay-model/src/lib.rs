@@ -5,10 +5,15 @@
 //! Keep this minimal until palette / registry decoding is proven.
 
 pub mod chunk;
+pub mod replay_state;
 
 pub use chunk::{
     BiomeSectionData, BlockEntity, BlockPos, CanonicalBlockState, CanonicalChunk, CanonicalSection,
     HeightmapData, LightingData, SectionLight,
+};
+pub use replay_state::{
+    CanonicalEntity, CanonicalReplayState, Dimension, LocalPlayer, PlayerMetadata, SpawnInfo,
+    UnknownAction, WorldBorder, WorldTime,
 };
 
 use serde::{Deserialize, Serialize};

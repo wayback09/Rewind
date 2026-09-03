@@ -11,6 +11,7 @@
 pub mod chunk;
 pub mod palette;
 pub mod registry;
+pub mod snapshot;
 
 use serde::{Deserialize, Serialize};
 
@@ -62,3 +63,4 @@ pub trait BlockStateRegistry: Send + Sync {
 pub use chunk::{decode_canonical_chunk, ChunkDecodeError};
 pub use palette::{decode_chunk_packet, SectionPaletteInfo, SectionPalettes};
 pub use registry::{load_26_2_registry, RegistryError, RegistrySource};
+pub use snapshot::{decode_snapshot, decode_snapshot_with_data, SnapshotDecode};

@@ -27,7 +27,7 @@ pub enum ChunkDecodeError {
 /// Decode a full `level_chunk_caches/0` entry payload (the `ClientboundLevelChunkWithLightPacket` bytes)
 /// into a version-independent `CanonicalChunk`.
 ///
-/// This is the M2 canonical chunk conversion — it expands palettes to 4096 states via the 26.2 registry,
+/// This is the M2 canonical chunk conversion -- it expands palettes to 4096 states via the 26.2 registry,
 /// preserves block entity NBT, and preserves lighting/heightmaps as raw where uncertain.
 pub fn decode_canonical_chunk(
     packet_bytes: &[u8],
@@ -61,7 +61,7 @@ pub fn decode_canonical_chunk(
         )));
     }
     let mut heightmaps: BTreeMap<String, Vec<u64>> = BTreeMap::new();
-    // Heightmap types for 26.2 — we don't have enum mapping, so keep raw type id as string.
+    // Heightmap types for 26.2 -- we don't have enum mapping, so keep raw type id as string.
     for _ in 0..map_size {
         let (htype, m) =
             read_varint(packet_bytes, off).map_err(|e| ChunkDecodeError::Packet(e.message))?;
@@ -119,10 +119,10 @@ pub fn decode_canonical_chunk(
     let buffer = &packet_bytes[off..off + buf_len_usize];
     off += buf_len_usize;
 
-    // Decode sections from buffer — for 26.2, minY -64, height 384 => 24 sections, Y -4..19
+    // Decode sections from buffer -- for 26.2, minY -64, height 384 => 24 sections, Y -4..19
     let palettes = decode_section_palettes(buffer, 24).map_err(ChunkDecodeError::Palette)?;
 
-    // blockEntities: List<BlockEntityInfo> via StreamCodec — we need to decode it.
+    // blockEntities: List<BlockEntityInfo> via StreamCodec -- we need to decode it.
     // In ClientboundLevelChunkPacketData, after buffer, comes blockEntitiesData: VarInt size, then each entry:
     //   packedXZ: u8, y: i16 (short BE), type: VarInt (BlockEntityType id), tag: CompoundTag (NBT)
     // For 26.2, BlockEntityType registry size maybe ~10-20, but we treat type as VarInt and preserve tag as raw NBT bytes.
@@ -154,22 +154,57 @@ pub fn decode_canonical_chunk(
         let (type_id, m) =
             read_varint(packet_bytes, off).map_err(|e| ChunkDecodeError::BlockEntity(e.message))?;
         off += m;
-        // NBT tag: CompoundTag — first byte is tag type (0x0A for compound, 0x00 for end)
+        let local_x = ((packed_xz >> 4) & 0xF) as i32;
+        let local_z = (packed_xz & 0xF) as i32;
+        let world_x = x * 16 + local_x;
+        let world_z = z * 16 + local_z;
+        // NBT tag: CompoundTag -- first byte is tag type (0x0A for compound, 0x00 for end)
         // We need to parse NBT to know its length. For simplicity, we will try to parse as NBT and capture raw bytes.
         // NBT is: tag type byte, then payload. For CompoundTag, it's 0x0A, then name (u16 len + bytes, for root it's 0 length), then tags until 0x00 end.
         // We can use a simple NBT parser to find the end.
         let tag_start = off;
-        let (tag_value, consumed) = parse_nbt_compound(packet_bytes, off).map_err(|e| {
-            ChunkDecodeError::BlockEntity(format!("NBT parse failed at {}: {}", off, e))
-        })?;
+        let (tag_value, consumed) = match parse_nbt_compound(packet_bytes, off) {
+            Ok(v) => v,
+            Err(e) => {
+                // Lenient: preserve raw NBT bytes as hex string if parsing fails (e.g., unknown tag type 255)
+                // This can happen for some block entities with custom NBT that our minimal parser doesn't handle.
+                // We will capture the raw bytes from off to end of the packet's blockEntity section as hex, but we need to know how many bytes to skip.
+                // For leniency, we will try to find the next block entity's header or the end of the packet by scanning for the next valid tag.
+                // As a simple fallback, we will treat the remaining bytes up to the next plausible block entity header as raw and break.
+                // For now, we will just create a placeholder NBT with error info and advance by 1 byte to avoid infinite loop.
+                // To avoid losing the chunk, we will create a placeholder and try to continue.
+                // We will attempt to find the next 0x0A (CompoundTag) or end by scanning.
+                let raw_hex = packet_bytes[off..std::cmp::min(packet_bytes.len(), off + 64)]
+                    .iter()
+                    .map(|b| format!("{:02x}", b))
+                    .collect::<Vec<_>>()
+                    .join(" ");
+                let placeholder = serde_json::json!({
+                    "error": format!("NBT parse failed at {}: {}", off, e),
+                    "raw_prefix_hex": raw_hex,
+                    "raw_len": packet_bytes.len() - off
+                });
+                // Try to advance by at least 1 byte to avoid infinite loop, but we need to find the next block entity.
+                // For now, break out of blockEntities loop and treat as end of blockEntities.
+                // We will push a placeholder and break.
+                let placeholder_be = BlockEntity {
+                    pos: BlockPos {
+                        x: world_x,
+                        y,
+                        z: world_z,
+                    },
+                    packed_xz,
+                    y,
+                    type_name: format!("minecraft:block_entity_type_{} (nbt_error)", type_id),
+                    nbt: placeholder,
+                };
+                block_entities.push(placeholder_be);
+                // Break out of the blockEntities loop  we cannot reliably find the next entry without knowing the NBT length.
+                // For M2/M3, we will just break and treat remaining blockEntities as unknown, but still preserve the chunk.
+                break;
+            }
+        };
         off += consumed;
-
-        // Derive block pos: packedXZ = (x & 0xF) <<4 | (z &0xF), y is world Y
-        let local_x = ((packed_xz >> 4) & 0xF) as i32;
-        let local_z = (packed_xz & 0xF) as i32;
-        // World pos: chunkX*16 + local_x, y, chunkZ*16 + local_z
-        let world_x = x * 16 + local_x;
-        let world_z = z * 16 + local_z;
 
         // Resolve block entity type name via registry? For now, keep as string "type_{id}" and also try to resolve via BlockEntityType registry if available.
         // For M2, we preserve the numeric type id as string and also try to map via known types for 26.2.
@@ -379,7 +414,7 @@ fn expand_section(
     Ok(out)
 }
 
-/// Minimal NBT CompoundTag parser — returns JSON Value and bytes consumed.
+/// Minimal NBT CompoundTag parser -- returns JSON Value and bytes consumed.
 /// For M2, we only need to preserve the tag, not fully validate.
 /// Supports: TAG_End (0), TAG_Byte (1), Short (2), Int (3), Long (4), Float (5), Double (6), ByteArray (7), String (8), List (9), Compound (10), IntArray (11), LongArray (12)
 /// For block entities, the tag is a Compound with no name (root), containing fields like `SpawnData`, `id`, etc.

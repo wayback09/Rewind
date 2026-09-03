@@ -17,6 +17,10 @@ path = "src/bin/flashback-idmap-probe.rs"
 name = "flashback-canonical-probe"
 path = "src/bin/flashback-canonical-probe.rs"
 
+[[bin]]
+name = "flashback-replay-state-probe"
+path = "src/bin/flashback-replay-state-probe.rs"
+
 [dependencies]
 flashback-format = { path = "../flashback-format" }
 minecraft-version = { path = "../minecraft-version" }
