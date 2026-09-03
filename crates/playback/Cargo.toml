@@ -1,0 +1,14 @@
+[package]
+name = "playback"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Canonical replay playback engine (M4) - tick-by-tick state evolution"
+
+[dependencies]
+flashback-format = { path = "../flashback-format" }
+minecraft-version = { path = "../minecraft-version" }
+replay-model = { path = "../replay-model" }
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+thiserror = "1.0"

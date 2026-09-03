@@ -25,5 +25,6 @@ path = "src/bin/flashback-replay-state-probe.rs"
 flashback-format = { path = "../flashback-format" }
 minecraft-version = { path = "../minecraft-version" }
 replay-model = { path = "../replay-model" }
+playback = { path = "../playback" }
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"

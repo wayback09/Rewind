@@ -5,7 +5,7 @@ use crate::error::{FormatError, Result};
 /// Mirrors FriendlyByteBuf.readVarInt().
 pub fn read_varint(data: &[u8], offset: usize) -> Result<(i32, usize)> {
     let mut num_read: usize = 0;
-    let mut result: i32 = 0;
+    let mut result: u32 = 0;
     let mut shift: u32 = 0;
 
     loop {
@@ -19,8 +19,14 @@ pub fn read_varint(data: &[u8], offset: usize) -> Result<(i32, usize)> {
             .with_context(format!("reading VarInt at offset {}", offset)));
         }
         let byte = data[offset + num_read];
-        let value = (byte & 0x7F) as i32;
-        result |= value << shift;
+        // For the 5th byte (num_read==4), only 4 bits are valid (32 bits total, 4*7=28, +4=32)
+        let value = if num_read == 4 {
+            (byte & 0x0F) as u32
+        } else {
+            (byte & 0x7F) as u32
+        };
+        // Use wrapping_shl to avoid panic on overflow for large values (e.g., 127<<28 as u32 is 0xF0000000)
+        result |= value.wrapping_shl(shift);
 
         num_read += 1;
         if num_read > 5 {
@@ -33,7 +39,7 @@ pub fn read_varint(data: &[u8], offset: usize) -> Result<(i32, usize)> {
         }
         shift += 7;
     }
-    Ok((result, num_read))
+    Ok((result as i32, num_read))
 }
 
 /// Read big-endian i32 at offset.
