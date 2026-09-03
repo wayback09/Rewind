@@ -6,8 +6,8 @@ Rewind reads Flashback recordings directly, validates their binary structure, de
 
 The long-term goal is a standalone replay viewer/editor capable of reconstructing and editing Flashback recordings without requiring the Minecraft client.
 
-> **Status:** M0, M1, M2, M3, and M4 complete. M5 (snapshot-based seeking) complete — random-access validated.  
-> Rendering and the desktop UI come later.
+> **Status:** M0, M1, M2, M3, M4, M5, and **M6 (scene representation)** complete — renderer-independent Scene validated, seek→scene == sequential→scene.  
+> Rendering (M7) and the desktop UI come later.
 
 ## Features
 
@@ -239,6 +239,17 @@ Output: `target/verify-m5.json` — `validation_ok: true` when all seek targets 
 
 Probe targets are tiny for CI (`[0,1,5,10]` and `1311/1312`) to keep runtime under ~120s in release.
 
+### M6 — Renderer-independent scene representation
+
+```powershell
+cargo run --release --bin flashback-scene-probe -- recordings/basic/test_recording.zip
+cargo run --release --bin flashback-scene-probe -- recordings/chunks/test_recording3.zip
+```
+
+M6 builds `Scene` from `CanonicalReplayState` (no Flashback/Minecraft parsing). Exposes `SceneChunk/Section` (x,z, section_y, y_base, blocks, lighting/biome `RawPreserved`), `SceneEntity`/`LocalPlayerScene` (`minecraft:zombie` not numeric), `SceneEnvironment` (dimension/sky/time/border), `AssetProvider` trait (`StubAssetProvider` → `Known/Unavailable/Unsupported`), `fingerprint` (FNV over sorted chunks/entities), `diff` (ChunkAdded/Changed etc.), and coordinate helpers (`world→chunk/section/local`, `idx=(y*16+z)*16+x`). Validates `seek(T)→scene` fingerprint `==` sequential `→scene` for `T=[0,1,100,500,1311,1312,final]` and Overworld→Nether (1311) transition.
+
+Output: `target/verify-m6.json` (and per-recording `target/verify-m6-*.json`) — `validation_ok: true`, `construction_time_ms` ~1-2s per scene (large 557-chunk fast path avoids 54M clones). Probe covers all three recordings (916t, 2242t, 2341t).
+
 Example:
 
 ```
@@ -301,6 +312,9 @@ Rewind/
 │   ├── playback/
 │   │   └── # M4/M5 tick-by-tick + seeking (snapshot cache, checkpoints)
 │   │
+│   ├── scene/
+│   │   └── # M6 renderer-independent Scene (coordinates, builder, fingerprint, diff, asset)
+│   │
 │   └── app/
 │       └── src/bin/
 │           ├── flashback-probe.rs
@@ -308,7 +322,8 @@ Rewind/
 │           ├── flashback-canonical-probe.rs
 │           ├── flashback-replay-state-probe.rs
 │           ├── flashback-playback-probe.rs
-│           └── flashback-seek-probe.rs
+│           ├── flashback-seek-probe.rs
+│           └── flashback-scene-probe.rs
 │
 └── recordings/
     └── # Local test recordings

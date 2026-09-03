@@ -5,6 +5,7 @@ members = [
     "crates/replay-model",
     "crates/app",
     "crates/playback",
+    "crates/scene",
 ]
 resolver = "2"
 

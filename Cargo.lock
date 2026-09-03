@@ -16,6 +16,7 @@ dependencies = [
  "minecraft-version",
  "playback",
  "replay-model",
+ "scene",
  "serde",
  "serde_json",
 ]
@@ -195,6 +196,16 @@ version = "0.1.0"
 dependencies = [
  "serde",
  "serde_json",
+]
+
+[[package]]
+name = "scene"
+version = "0.1.0"
+dependencies = [
+ "replay-model",
+ "serde",
+ "serde_json",
+ "thiserror 1.0.69",
 ]
 
 [[package]]

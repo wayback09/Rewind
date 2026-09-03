@@ -1,0 +1,12 @@
+[package]
+name = "scene"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "M6 renderer-independent scene representation (canonical -> scene)"
+
+[dependencies]
+replay-model = { path = "../replay-model" }
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+thiserror = "1.0"
