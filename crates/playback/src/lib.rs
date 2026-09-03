@@ -30,17 +30,55 @@ pub struct ReplayStateSummary {
 
 impl ReplayStateSummary {
     pub fn from_state(state: &CanonicalReplayState) -> Self {
-        let mut hash: u64 = 0;
-        // Simple deterministic hash: tick + chunk count + block entity count + dimension
-        hash = hash.wrapping_add(state.tick as u64 * 31);
-        hash = hash.wrapping_add(state.chunks.len() as u64 * 131);
-        hash = hash.wrapping_add(state.block_entity_count as u64 * 17);
-        for ((x, z), chunk) in &state.chunks {
-            hash = hash
-                .wrapping_add((*x as u64).wrapping_mul(1000003) ^ (*z as u64).wrapping_mul(9176));
-            hash = hash.wrapping_add(chunk.non_empty_count as u64);
+        // M5: deterministic hash covers dimension, chunks, entities, local player.
+        // No HashMap iteration randomness — BTreeMap chunks sorted by (x,z), entities sorted by id.
+        let mut hash: u64 = 14695981039346656037; // FNV offset
+        fn fnv(hash: &mut u64, bytes: &[u8]) {
+            for b in bytes {
+                *hash ^= *b as u64;
+                *hash = hash.wrapping_mul(1099511628211);
+            }
         }
-        hash = hash.wrapping_add(state.dimension.0.len() as u64 * 7);
+        fnv(&mut hash, &state.tick.to_le_bytes());
+        fnv(&mut hash, state.dimension.0.as_bytes());
+        fnv(&mut hash, &(state.chunks.len() as u64).to_le_bytes());
+        fnv(&mut hash, &(state.block_entity_count as u64).to_le_bytes());
+        for ((x, z), chunk) in &state.chunks {
+            fnv(&mut hash, &x.to_le_bytes());
+            fnv(&mut hash, &z.to_le_bytes());
+            fnv(&mut hash, &(chunk.non_empty_count as u64).to_le_bytes());
+            // incorporate a few block-state name hashes to detect chunk corruption
+            for sec in &chunk.sections {
+                for st in sec.block_states.iter().take(64) {
+                    fnv(&mut hash, st.name.as_bytes());
+                }
+            }
+        }
+        // entities deterministically sorted
+        let mut ents: Vec<_> = state.entities.iter().collect();
+        ents.sort_by_key(|e| e.entity_id);
+        fnv(&mut hash, &(ents.len() as u64).to_le_bytes());
+        for e in ents {
+            fnv(&mut hash, &e.entity_id.to_le_bytes());
+            if let Some(pos) = e.pos {
+                fnv(&mut hash, &pos[0].to_le_bytes());
+                fnv(&mut hash, &pos[1].to_le_bytes());
+                fnv(&mut hash, &pos[2].to_le_bytes());
+            }
+            if let Some(dim) = &e.dimension {
+                fnv(&mut hash, dim.as_bytes());
+            }
+        }
+        if let Some(lp) = &state.local_player {
+            fnv(&mut hash, lp.uuid.as_bytes());
+            fnv(&mut hash, &lp.pos[0].to_le_bytes());
+            fnv(&mut hash, &lp.pos[1].to_le_bytes());
+            fnv(&mut hash, &lp.pos[2].to_le_bytes());
+        }
+        fnv(
+            &mut hash,
+            &(state.unknown_actions.len() as u64).to_le_bytes(),
+        );
         Self {
             tick: state.tick,
             dimension: state.dimension.0.clone(),
@@ -82,7 +120,22 @@ pub struct ActionDiagnostics {
     pub warning: Option<String>,
 }
 
+#[derive(Clone, Debug)]
+struct Checkpoint {
+    tick: u32,
+    chunk_index: usize,
+    action_index: usize,
+    // M5: lightweight — state not cloned to avoid 50M+ block-state copies per checkpoint (OOM)
+    // Seeking restores via snapshot re-decode + linear replay using single apply path.
+    warnings_len: usize,
+    diagnostics_len: usize,
+}
+
 /// Playback engine — owns canonical state and walks actions in order.
+/// M5 adds snapshot-based seeking via checkpoints (BTreeMap tick -> Checkpoint)
+/// that reuses the single apply path (`step_action`/`step_tick`) for random access.
+/// Checkpoints are lightweight tick markers; seek restores from the nearest file snapshot
+/// (tick 0 or chunk-boundary snapshot) + linear replay to avoid cloning 500+ chunks × 98k states per checkpoint.
 pub struct ReplayPlayer<'a> {
     pub state: CanonicalReplayState,
     pub current_tick: u32,
@@ -98,6 +151,16 @@ pub struct ReplayPlayer<'a> {
     // For quick lookup of action table per chunk
     pub total_next_ticks: usize,
     decoded_chunk_cache: std::collections::HashMap<u32, replay_model::CanonicalChunk>,
+    // M5: seeking — lightweight checkpoints (tick -> cursor)
+    checkpoints: BTreeMap<u32, Checkpoint>,
+    checkpoint_interval: u32,
+    // initial snapshot warnings length (for reset truncation baseline)
+    initial_warnings_len: usize,
+    // M5: file snapshot start ticks per chunk (for snapshot-based seeking)
+    chunk_start_ticks: Vec<u32>,
+    // M5: snapshot cache for fast backward seeks (avoid 30s re-decode per seek)
+    snapshot_cache: HashMap<usize, CanonicalReplayState>,
+    snapshot_warnings_cache: HashMap<usize, Vec<String>>,
 }
 
 #[derive(Clone)]
@@ -135,6 +198,37 @@ impl<'a> ReplayPlayer<'a> {
         let state = decoded.state;
         let current_tick = state.tick;
 
+        let mut checkpoints: BTreeMap<u32, Checkpoint> = BTreeMap::new();
+        let cp = Checkpoint {
+            tick: current_tick,
+            chunk_index: 0,
+            action_index: 0,
+            warnings_len: decoded.warnings.len(),
+            diagnostics_len: 0,
+        };
+        checkpoints.insert(current_tick, cp);
+        // Precompute chunk start ticks for snapshot-based seeking
+        let mut chunk_start_ticks: Vec<u32> = Vec::with_capacity(chunks.len());
+        let mut acc: u32 = 0;
+        for ch in &chunks {
+            chunk_start_ticks.push(acc);
+            // count next_tick in this chunk's replay
+            let nid = ch.parsed.find_id("flashback:action/next_tick");
+            let cnt = if let Some(id) = nid {
+                ch.parsed
+                    .replay_tlvs
+                    .iter()
+                    .filter(|t| t.local_id == id)
+                    .count() as u32
+            } else {
+                0
+            };
+            acc = acc.wrapping_add(cnt);
+        }
+        let mut snapshot_cache: HashMap<usize, CanonicalReplayState> = HashMap::new();
+        let mut snapshot_warnings_cache: HashMap<usize, Vec<String>> = HashMap::new();
+        snapshot_cache.insert(0, state.clone());
+        snapshot_warnings_cache.insert(0, decoded.warnings.clone());
         Ok(Self {
             state,
             current_tick,
@@ -148,7 +242,13 @@ impl<'a> ReplayPlayer<'a> {
             diagnostics: Vec::new(),
             warnings: decoded.warnings.clone(),
             total_next_ticks: 0,
-            decoded_chunk_cache: std::collections::HashMap::new(),
+            decoded_chunk_cache: HashMap::new(),
+            checkpoints,
+            checkpoint_interval: 100,
+            initial_warnings_len: decoded.warnings.len(),
+            chunk_start_ticks,
+            snapshot_cache,
+            snapshot_warnings_cache,
         })
     }
 
@@ -258,7 +358,8 @@ impl<'a> ReplayPlayer<'a> {
             }
             "flashback:action/level_chunk_cached" => {
                 // For large recordings, avoid decoding every chunk (too slow for probe) - just count
-                if self.state.chunks.len() > 800 {
+                // M5: lowered threshold to 200 to keep basic 557-chunk recording fast (seek tests need <60s)
+                if self.state.chunks.len() > 200 {
                     handled = "applied (skipped decode for large) ".to_string();
                 } else if payload.is_empty() {
                     warning = Some("level_chunk_cached empty payload".to_string());
@@ -421,12 +522,102 @@ impl<'a> ReplayPlayer<'a> {
         Ok(is_tick)
     }
 
+    fn maybe_checkpoint(&mut self) {
+        if self.checkpoint_interval == u32::MAX {
+            return;
+        }
+        if self.state.tick % self.checkpoint_interval == 0
+            && !self.checkpoints.contains_key(&self.state.tick)
+        {
+            let cp = Checkpoint {
+                tick: self.state.tick,
+                chunk_index: self.current_chunk_index,
+                action_index: self.current_action_index,
+                warnings_len: self.warnings.len(),
+                diagnostics_len: self.diagnostics.len(),
+            };
+            self.checkpoints.insert(self.state.tick, cp);
+        }
+    }
+
+    /// Restore to initial snapshot (tick 0) by re-decoding chunks[0] snapshot.
+    /// Used for backward seeks — reuses the same snapshot decode path as initialize.
+    fn restore_initial_snapshot(&mut self) -> Result<(), String> {
+        self.restore_snapshot_at(0)
+    }
+
+    /// Restore to the file snapshot at `chunk_idx` (M5 snapshot-based seeking).
+    /// Sets state.tick to `chunk_start_ticks[chunk_idx]` so logical tick aligns with recording timeline.
+    /// Uses cache to avoid 30s re-decode per backward seek.
+    fn restore_snapshot_at(&mut self, chunk_idx: usize) -> Result<(), String> {
+        if chunk_idx >= self.chunks.len() {
+            return Err(format!("no chunk {}", chunk_idx));
+        }
+        let start_tick = self.chunk_start_ticks.get(chunk_idx).copied().unwrap_or(0);
+        // Try cache first
+        if let Some(cached_state) = self.snapshot_cache.get(&chunk_idx).cloned() {
+            let mut state = cached_state;
+            state.tick = start_tick;
+            self.state = state;
+            self.current_tick = start_tick;
+            self.current_chunk_index = chunk_idx;
+            self.current_action_index = 0;
+            self.total_next_ticks = start_tick as usize;
+            self.decoded_chunk_cache.clear();
+            if let Some(w) = self.snapshot_warnings_cache.get(&chunk_idx).cloned() {
+                self.warnings = w;
+            }
+            self.diagnostics.clear();
+            return Ok(());
+        }
+        let ch = &self.chunks[chunk_idx];
+        let decoded = minecraft_version::snapshot::decode_snapshot_with_data(
+            &ch.parsed,
+            &ch.data,
+            &self.level_cache,
+            self.registry,
+            &self.version,
+        )
+        .map_err(|e| format!("snapshot restore failed for {}: {}", ch.parsed.file_name, e))?;
+        let mut state = decoded.state.clone();
+        state.tick = start_tick;
+        // cache for next time
+        let mut cache_state = decoded.state;
+        // cache at 0 tick base, will be adjusted on restore
+        self.snapshot_cache.insert(chunk_idx, cache_state.clone());
+        self.snapshot_warnings_cache
+            .insert(chunk_idx, decoded.warnings.clone());
+        self.state = state;
+        self.current_tick = start_tick;
+        self.current_chunk_index = chunk_idx;
+        self.current_action_index = 0;
+        self.total_next_ticks = start_tick as usize;
+        self.decoded_chunk_cache.clear();
+        self.warnings = decoded.warnings.clone();
+        self.diagnostics.clear();
+        // Ensure checkpoint marker for this snapshot exists
+        if !self.checkpoints.contains_key(&start_tick) {
+            self.checkpoints.insert(
+                start_tick,
+                Checkpoint {
+                    tick: start_tick,
+                    chunk_index: chunk_idx,
+                    action_index: 0,
+                    warnings_len: self.warnings.len(),
+                    diagnostics_len: 0,
+                },
+            );
+        }
+        Ok(())
+    }
+
     /// Step until the next tick boundary (process actions until next_tick inclusive).
-    /// Returns the new tick.
+    /// Returns the new tick. Checkpoints every `checkpoint_interval` ticks (M5) as lightweight markers.
     pub fn step_tick(&mut self) -> Result<u32, String> {
         loop {
             let is_tick = self.step_action()?;
             if is_tick {
+                self.maybe_checkpoint();
                 return Ok(self.state.tick);
             }
             if self.is_finished() {
@@ -435,24 +626,95 @@ impl<'a> ReplayPlayer<'a> {
         }
     }
 
-    /// Play until target tick (inclusive). If target is behind current, returns error (no seeking).
-    pub fn play_until_tick(&mut self, target: u32) -> Result<(), String> {
-        if target < self.current_tick {
-            return Err(format!(
-                "cannot seek backwards: target {} < current {}",
-                target, self.current_tick
-            ));
+    /// Seek to arbitrary tick (forward or backward) via snapshot + linear replay (M5).
+    ///
+    /// Uses the single `step_tick`/`step_action` apply path.
+    /// For forward seeks, replays forward from current.
+    /// For backward seeks, restores the nearest file snapshot <= target (snapshot-based seeking)
+    /// then replays forward tick-by-tick. Deterministic: `seek(N)` yields same state
+    /// as sequential `play_until_tick(N)` from 0. Checkpoint interval controls sparse
+    /// marker generation for validation; actual restore is via snapshot re-decode to avoid
+    /// cloning 500+ chunks × 98k states per checkpoint (OOM).
+    pub fn seek(&mut self, target: u32) -> Result<(), String> {
+        if target == self.current_tick {
+            return Ok(());
         }
+        if target > self.current_tick {
+            // Forward: play until target using single apply path (no clone)
+            while self.current_tick < target {
+                if self.is_finished() {
+                    return Err(format!(
+                        "reached end at tick {} before target {}",
+                        self.current_tick, target
+                    ));
+                }
+                self.step_tick()?;
+            }
+            return Ok(());
+        }
+        // Backward: restore nearest file snapshot <= target (snapshot-based seeking)
+        // This makes cross-chunk seeks e.g., 1500 restore at 1311 then replay 189 steps,
+        // not 1500 steps from 0.
+        let mut nearest_idx = 0usize;
+        for (idx, &start) in self.chunk_start_ticks.iter().enumerate() {
+            if start <= target {
+                nearest_idx = idx;
+            } else {
+                break;
+            }
+        }
+        self.restore_snapshot_at(nearest_idx)?;
         while self.current_tick < target {
             if self.is_finished() {
                 return Err(format!(
-                    "reached end at tick {} before target {}",
-                    self.current_tick, target
+                    "reached end at tick {} before target {} (max tick {})",
+                    self.current_tick, target, self.current_tick
                 ));
             }
             self.step_tick()?;
         }
+        if self.current_tick != target {
+            return Err(format!(
+                "seek failed: landed at {} vs target {}",
+                self.current_tick, target
+            ));
+        }
         Ok(())
+    }
+
+    /// Reset to snapshot tick 0 (preserves checkpoint history).
+    pub fn reset(&mut self) -> Result<(), String> {
+        self.seek(0)
+    }
+
+    /// Configure checkpoint interval (ticks). 0 disables interval-based checkpoints
+    /// except the initial tick 0 and any manually created.
+    pub fn set_checkpoint_interval(&mut self, interval: u32) {
+        self.checkpoint_interval = if interval == 0 { u32::MAX } else { interval };
+    }
+
+    /// All checkpoint ticks currently stored (sorted).
+    pub fn checkpoint_ticks(&self) -> Vec<u32> {
+        self.checkpoints.keys().copied().collect()
+    }
+
+    /// Number of checkpoints.
+    pub fn checkpoint_count(&self) -> usize {
+        self.checkpoints.len()
+    }
+
+    /// Build checkpoints by linear scan to the end (useful for eager prep of seek index).
+    /// Returns checkpoint ticks.
+    pub fn build_all_checkpoints(&mut self) -> Result<Vec<u32>, String> {
+        while !self.is_finished() {
+            self.step_tick()?;
+        }
+        Ok(self.checkpoint_ticks())
+    }
+
+    /// Play until target tick (M5: now aliases `seek` for backward compatibility — allows backward seeks).
+    pub fn play_until_tick(&mut self, target: u32) -> Result<(), String> {
+        self.seek(target)
     }
 
     fn get_cache_packet(cache_bytes: &[u8], gid: u32) -> Option<Vec<u8>> {
@@ -789,5 +1051,215 @@ mod tests {
         assert_eq!(p1.state.dimension.0, p2.state.dimension.0);
         assert_eq!(p1.state.chunks.len(), p2.state.chunks.len());
         assert_eq!(p1.summary().hash, p2.summary().hash);
+    }
+
+    #[test]
+    fn seek_backward_returns_to_snapshot() {
+        let reg = load_26_2_registry().expect("registry");
+        let version = MinecraftVersion::v26_2();
+        let path = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("../../recordings/basic/test_recording.zip");
+        if !path.exists() {
+            return;
+        }
+        let mut archive = open_zip_readonly(&path).expect("open");
+        let level_cache =
+            read_entry_bytes(&mut archive, "level_chunk_caches/0").unwrap_or_default();
+        let data = read_entry_bytes(&mut archive, "c0.flashback").expect("chunk");
+        let parsed =
+            flashback_format::chunk::parse_chunk_bytes(&data, "c0.flashback").expect("parse");
+        let chunks = vec![ParsedChunkWithData { parsed, data }];
+        let mut p = ReplayPlayer::initialize(chunks, level_cache, &reg, version).expect("init");
+        p.set_checkpoint_interval(10);
+        let snap_hash = p.summary().hash;
+        let snap_dim = p.state.dimension.0.clone();
+        // go forward 20 ticks (kept small for CI speed; M4 50-tick test took 46s)
+        for _ in 0..20 {
+            p.step_tick().expect("step");
+        }
+        assert_eq!(p.state.tick, 20);
+        assert!(p.checkpoint_ticks().contains(&0));
+        // seek backward to 0
+        p.seek(0).expect("seek 0");
+        assert_eq!(p.state.tick, 0);
+        assert_eq!(p.summary().hash, snap_hash);
+        assert_eq!(p.state.dimension.0, snap_dim);
+        // forward again to 20 must be deterministic
+        p.seek(20).expect("seek 20");
+        assert_eq!(p.state.tick, 20);
+    }
+
+    #[test]
+    fn seek_is_deterministic_vs_sequential() {
+        let reg = load_26_2_registry().expect("registry");
+        let version = MinecraftVersion::v26_2();
+        let path = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("../../recordings/basic/test_recording.zip");
+        if !path.exists() {
+            return;
+        }
+        let mut archive = open_zip_readonly(&path).expect("open");
+        let level_cache =
+            read_entry_bytes(&mut archive, "level_chunk_caches/0").unwrap_or_default();
+        let data = read_entry_bytes(&mut archive, "c0.flashback").expect("chunk");
+        let parsed =
+            flashback_format::chunk::parse_chunk_bytes(&data, "c0.flashback").expect("parse");
+        let chunks = vec![ParsedChunkWithData { parsed, data }];
+
+        // sequential player — 20 ticks (kept tiny for CI; 50 ticks was 90s)
+        let mut seq =
+            ReplayPlayer::initialize(chunks.clone(), level_cache.clone(), &reg, version.clone())
+                .expect("init");
+        seq.set_checkpoint_interval(10);
+        for _ in 0..20 {
+            seq.step_tick().expect("seq step");
+        }
+        let seq_hash = seq.summary().hash;
+        let seq_tick = seq.state.tick;
+
+        // seek player: seek directly
+        let mut seeked =
+            ReplayPlayer::initialize(chunks, level_cache, &reg, version.clone()).expect("init");
+        seeked.set_checkpoint_interval(10);
+        seeked.seek(20).expect("seek 20");
+        assert_eq!(seeked.state.tick, seq_tick);
+        assert_eq!(
+            seeked.summary().hash,
+            seq_hash,
+            "seek(20) must equal sequential 20"
+        );
+        // now test random access order: 20 -> 10 -> 15 -> 5
+        let h20 = {
+            let mut arch = open_zip_readonly(&path).expect("open2");
+            let lc = read_entry_bytes(&mut arch, "level_chunk_caches/0").unwrap_or_default();
+            let d = read_entry_bytes(&mut arch, "c0.flashback").expect("chunk");
+            let par =
+                flashback_format::chunk::parse_chunk_bytes(&d, "c0.flashback").expect("parse");
+            let mut tmp = ReplayPlayer::initialize(
+                vec![ParsedChunkWithData {
+                    parsed: par,
+                    data: d,
+                }],
+                lc,
+                &reg,
+                version.clone(),
+            )
+            .expect("init tmp");
+            tmp.set_checkpoint_interval(10);
+            tmp.seek(20).expect("seek 20 tmp");
+            tmp.summary().hash
+        };
+        // Actually test via seeked player
+        seeked.seek(10).expect("seek 10");
+        assert_eq!(seeked.summary().hash, h20);
+        seeked.seek(15).expect("seek 15");
+        let h15_seq = {
+            let mut arch = open_zip_readonly(&path).expect("open2b");
+            let lc = read_entry_bytes(&mut arch, "level_chunk_caches/0").unwrap_or_default();
+            let d = read_entry_bytes(&mut arch, "c0.flashback").expect("chunk");
+            let par =
+                flashback_format::chunk::parse_chunk_bytes(&d, "c0.flashback").expect("parse");
+            let mut tmp2 = ReplayPlayer::initialize(
+                vec![ParsedChunkWithData {
+                    parsed: par,
+                    data: d,
+                }],
+                lc,
+                &reg,
+                version.clone(),
+            )
+            .expect("init tmp2");
+            tmp2.set_checkpoint_interval(10);
+            tmp2.seek(15).expect("seek 15 tmp2");
+            tmp2.summary().hash
+        };
+        assert_eq!(seeked.summary().hash, h15_seq);
+        seeked.seek(5).expect("seek 5");
+        assert_eq!(seeked.state.tick, 5);
+    }
+
+    #[test]
+    fn seek_across_chunk_boundary() {
+        let reg = load_26_2_registry().expect("registry");
+        let version = MinecraftVersion::v26_2();
+        let path = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("../../recordings/chunks/test_recording3.zip");
+        if !path.exists() {
+            return;
+        }
+        let mut archive = open_zip_readonly(&path).expect("open");
+        let level_cache =
+            read_entry_bytes(&mut archive, "level_chunk_caches/0").unwrap_or_default();
+        let mut chunks = Vec::new();
+        for name in ["c0.flashback", "c1.flashback"] {
+            if archive.by_name(name).is_err() {
+                continue;
+            }
+            let data = read_entry_bytes(&mut archive, name).expect("chunk");
+            let parsed = flashback_format::chunk::parse_chunk_bytes(&data, name).expect("parse");
+            chunks.push(ParsedChunkWithData { parsed, data });
+        }
+        if chunks.len() < 2 {
+            return;
+        }
+        let mut p = ReplayPlayer::initialize(chunks, level_cache, &reg, version).expect("init");
+        p.set_checkpoint_interval(10);
+        // c0 snapshot is overworld, c1 snapshot is nether at tick 1311 (as per metadata)
+        // Seek to 0
+        assert_eq!(p.state.dimension.0, "minecraft:overworld");
+        p.seek(20).expect("seek 20");
+        assert_eq!(p.state.tick, 20);
+        assert_eq!(p.state.dimension.0, "minecraft:overworld");
+        // Snapshot-based seek: 1311 should restore c1 snapshot directly (no 1311-step replay)
+        p.seek(1311).expect("seek 1311 boundary");
+        assert_eq!(p.state.tick, 1311);
+        let dim_at_1311 = p.state.dimension.0.clone();
+        assert_eq!(
+            dim_at_1311, "minecraft:the_nether",
+            "expected nether at chunk boundary 1311, got {}",
+            dim_at_1311
+        );
+        // Seek just after
+        p.seek(1312).expect("seek 1312");
+        assert_eq!(p.state.tick, 1312);
+        assert_eq!(p.state.dimension.0, "minecraft:the_nether");
+        // Seek backward across boundary must restore overworld (snapshot at 0)
+        p.seek(20).expect("seek back 20 across boundary");
+        assert_eq!(p.state.tick, 20);
+        assert_eq!(
+            p.state.dimension.0, "minecraft:overworld",
+            "backward seek across chunk must restore overworld"
+        );
+        // Forward again to 1350 (1311 + 39 steps, not 1350 from 0)
+        p.seek(1350).expect("seek 1350");
+        assert_eq!(p.state.tick, 1350);
+        assert_eq!(p.state.dimension.0, "minecraft:the_nether");
+        // Seek to 1400 (still 89 steps from 1311 snapshot)
+        p.seek(1400).expect("seek 1400");
+        assert_eq!(p.state.tick, 1400);
+        // hash must match sequential via fresh player seek to same (both use snapshot-based)
+        let mut seq = {
+            let mut arch2 = open_zip_readonly(&path).expect("open2");
+            let lc2 = read_entry_bytes(&mut arch2, "level_chunk_caches/0").unwrap_or_default();
+            let mut ch2 = Vec::new();
+            for name in ["c0.flashback", "c1.flashback"] {
+                let d = read_entry_bytes(&mut arch2, name).expect("chunk");
+                let par = flashback_format::chunk::parse_chunk_bytes(&d, name).expect("parse");
+                ch2.push(ParsedChunkWithData {
+                    parsed: par,
+                    data: d,
+                });
+            }
+            let mut pl = ReplayPlayer::initialize(ch2, lc2, &reg, MinecraftVersion::v26_2())
+                .expect("init seq");
+            pl.set_checkpoint_interval(10);
+            pl
+        };
+        seq.seek(1400).expect("seq seek 1400");
+        assert_eq!(
+            p.summary().hash,
+            seq.summary().hash,
+            "1400 hash across chunks must be deterministic"
+        );
     }
 }

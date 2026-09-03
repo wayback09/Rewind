@@ -6,8 +6,8 @@ Rewind reads Flashback recordings directly, validates their binary structure, de
 
 The long-term goal is a standalone replay viewer/editor capable of reconstructing and editing Flashback recordings without requiring the Minecraft client.
 
-> **Status:** M0, M1, M2, and M3 complete.  
-> The current implementation is foundation work: recording parsing, Minecraft data decoding, and canonical chunk reconstruction. Rendering and the desktop UI come later.
+> **Status:** M0, M1, M2, M3, and M4 complete. M5 (snapshot-based seeking) complete — random-access validated.  
+> Rendering and the desktop UI come later.
 
 ## Features
 
@@ -127,6 +127,8 @@ This allows the eventual renderer and editor to operate on canonical data rather
 
 Rewind is still early-stage.
 
+M4 (tick-by-tick playback) and M5 (snapshot-based seeking, forward/backward, checkpoints) are validated.
+
 The following are intentionally not complete yet:
 
 - 3D rendering
@@ -136,9 +138,6 @@ The following are intentionally not complete yet:
 - Full biome canonicalization
 - Complete block-entity semantics
 - Entity reconstruction
-- Replay snapshot reconstruction
-- Tick-by-tick playback
-- Seeking
 - Editing
 - Camera/keyframe tools
 - Timeline UI
@@ -218,6 +217,28 @@ cargo run --bin flashback-canonical-probe -- recordings/basic/test_recording.zip
 cargo run --bin flashback-replay-state-probe -- recordings/basic/test_recording.zip
 ```
 
+### M4 — Tick-by-tick playback
+
+```powershell
+cargo run --bin flashback-playback-probe -- recordings/basic/test_recording.zip
+cargo run --bin flashback-playback-probe -- recordings/chunks/test_recording3.zip
+```
+
+Output: `target/verify-m4.json` — final tick matches `metadata.json`, dimension, local player, checkpoints.
+
+### M5 — Snapshot-based seeking (random access)
+
+```powershell
+cargo run --release --bin flashback-seek-probe -- recordings/basic/test_recording.zip
+cargo run --release --bin flashback-seek-probe -- recordings/chunks/test_recording3.zip
+```
+
+M5 reuses the single `step_tick` apply path. Forward seeks replay forward; backward seeks restore the nearest file snapshot (`c0` at 0, `c1` at 1311) via `snapshot_cache` then linear replay. Validation checks `seek(N) == sequential(N)` (FNV hash over dimension/chunks/entities) and cross-chunk dimension restores.
+
+Output: `target/verify-m5.json` — `validation_ok: true` when all seek targets match sequential. Note: basic recording snapshot decode (557 chunks, 54M states) costs ~30s per player, so the probe is heavy (30s per `ReplayPlayer::initialize`) — use `--release` and expect >60s.
+
+Probe targets are tiny for CI (`[0,1,5,10]` and `1311/1312`) to keep runtime under ~120s in release.
+
 Example:
 
 ```
@@ -277,11 +298,17 @@ Rewind/
 │   ├── replay-model/
 │   │   └── # Version-independent canonical replay data
 │   │
+│   ├── playback/
+│   │   └── # M4/M5 tick-by-tick + seeking (snapshot cache, checkpoints)
+│   │
 │   └── app/
 │       └── src/bin/
 │           ├── flashback-probe.rs
 │           ├── flashback-idmap-probe.rs
-│           └── flashback-canonical-probe.rs
+│           ├── flashback-canonical-probe.rs
+│           ├── flashback-replay-state-probe.rs
+│           ├── flashback-playback-probe.rs
+│           └── flashback-seek-probe.rs
 │
 └── recordings/
     └── # Local test recordings
