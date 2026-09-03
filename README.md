@@ -6,7 +6,7 @@ Rewind reads Flashback recordings directly, validates their binary structure, de
 
 The long-term goal is a standalone replay viewer/editor capable of reconstructing and editing Flashback recordings without requiring the Minecraft client.
 
-> **Status:** M0, M1, and M2 complete.  
+> **Status:** M0, M1, M2, and M3 complete.  
 > The current implementation is foundation work: recording parsing, Minecraft data decoding, and canonical chunk reconstruction. Rendering and the desktop UI come later.
 
 ## Features
@@ -63,6 +63,22 @@ Rewind supports the Minecraft palette modes required by the current recordings, 
 - Minecraft bit storage
 
 ### M2 — Canonical chunk reconstruction
+
+Rewind now converts decoded Minecraft chunk data into a version-independent CanonicalChunk.
+
+### M3 — Canonical replay state (snapshot)
+
+Rewind now reconstructs the initial replay state from a Flashback replay chunk snapshot:
+
+- Dynamic action-table resolution (no hard-coded IDs)
+- Snapshot action dispatch via `flashback:action/*` identifiers
+- Dimension (`minecraft:overworld` / `the_nether` / `the_end`) from login packet
+- Chunks via `level_chunk_cached` → `level_chunk_caches/0` → `CanonicalChunk` (M2)
+- Local player via `create_local_player` (UUID, pos, yaw/pitch, velocity)
+- World border / time / spawn where decoded (raw preserved otherwise)
+- Player metadata / scoreboard raw preserved
+- Unknown actions preserved with `local_id`, `payload_len`, `payload_prefix_hex` for diagnostics
+- Initial tick 0, before replay deltas
 
 Rewind now converts decoded Minecraft chunk data into a version-independent CanonicalChunk.
 
@@ -199,6 +215,7 @@ target/verify-m1.json
 
 ```powershell
 cargo run --bin flashback-canonical-probe -- recordings/basic/test_recording.zip
+cargo run --bin flashback-replay-state-probe -- recordings/basic/test_recording.zip
 ```
 
 Example:
@@ -216,6 +233,7 @@ Output:
 
 ```
 target/verify-m2.json
+target/verify-m3.json
 ```
 
 ## Registry generation
