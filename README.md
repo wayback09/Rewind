@@ -1,87 +1,431 @@
 # Rewind
 
-Standalone desktop viewer for **Moulberry's Flashback** `.flashback` recordings — no Minecraft required.
+Standalone desktop viewer and editor for **Moulberry's Flashback** `.flashback` recordings — designed to work without Minecraft running.
 
-Rewind imports Flashback ZIPs, validates their framing, and (from M1) resolves every palette `globalId` to a canonical `minecraft:air|stone|oak_stairs[facing=north,…]` via the exact `26.2 / data 4903 / proto 776` `BuiltInRegistries.BLOCK` IdMap derived from your local `26.2.jar`.
+Rewind reads Flashback recordings directly, validates their binary structure, decodes Minecraft-specific data, and converts it into a version-independent canonical replay model.
 
-> **Status:** M0 (container/TLV) + M1 (registry/palette) complete. No rendering yet — foundation only.
+The long-term goal is a standalone replay viewer/editor capable of reconstructing and editing Flashback recordings without requiring the Minecraft client.
+
+> **Status:** M0, M1, and M2 complete.  
+> The current implementation is foundation work: recording parsing, Minecraft data decoding, and canonical chunk reconstruction. Rendering and the desktop UI come later.
 
 ## Features
 
-- **M0 — Container:** ZIP `DEFLATED`, `metadata.json`, `MAGIC 0xD780E884` BE, per-chunk `VarInt` action table (never hard-coded, `voice@0` shifts `next_tick@1`), `BE snapshotSize`, `TLV [VarInt id][BE size][payload]`, `level_chunk_caches/0 [BE size][ClientboundLevelChunkWithLightPacket]`, `next_tick == duration`, `total_ticks == Σ duration`.
-- **M1 — Registry:** `MinecraftVersion 26.2 / 4903 / 776`, `CanonicalBlockState {name, properties}`, `FileRegistry` (32366 states, `0:air, 1:stone, 85:bedrock, 578:sandstone, 3907:oak_stairs[…]`), `PalettedContainer` decoder (`bits`, `Linear`/`HashMap`/`Global` incl. `BitStorage`), `ClientboundLevelChunkWithLightPacket` → section palettes → resolved names.
+### M0 — Flashback container and recording format
+
+Rewind can read and validate the Flashback recording container:
+
+- ZIP/DEFLATE container
+- `metadata.json`
+- Replay chunk files
+- Flashback replay magic `0xD780E884`
+- Dynamic per-chunk action tables
+- VarInt identifiers
+- Snapshot framing
+- TLV action records
+- Level chunk cache entries
+- Tick boundary validation
+- Recording duration validation
+- Cross-checking `next_tick` counts against metadata
+
+Action IDs are resolved from the recording's action table rather than hard-coded.
+
+For example, optional actions can shift the IDs of core actions such as `next_tick`.
+
+### M1 — Minecraft registry and palette decoding
+
+Rewind can decode Minecraft 26.2 block-state palettes using the external Minecraft block-state registry.
+
+Current validated version:
+
+- **Minecraft:** 26.2
+- **Data version:** 4903
+- **Protocol:** 776
+- **Block states:** 32,366
+
+Numeric Minecraft block-state IDs are resolved into canonical states such as:
+
+```text
+minecraft:air
+minecraft:stone
+minecraft:bedrock
+minecraft:sandstone
+minecraft:oak_stairs[facing=north,half=top,shape=straight,waterlogged=true]
+```
+
+The registry is derived from the Minecraft 26.2 client JAR and stored as a compact indexed registry.
+
+Rewind supports the Minecraft palette modes required by the current recordings, including:
+
+- Single-value palettes
+- Indirect palettes
+- Global/direct palette
+- Minecraft bit storage
+
+### M2 — Canonical chunk reconstruction
+
+Rewind now converts decoded Minecraft chunk data into a version-independent CanonicalChunk.
+
+A canonical chunk contains:
+
+- Chunk coordinates
+- Sections
+- 4,096 canonical block states per section
+- Canonical block-state names and properties
+- Block entities
+- Block entity NBT
+- Heightmaps
+- Raw lighting data
+- Raw biome data
+- Section metadata
+- Non-empty block counts
+
+The important architectural boundary is:
+
+```text
+Flashback recording
+        │
+        ▼
+ flashback-format
+        │
+        │ raw recording structures
+        ▼
+ minecraft-version
+        │
+        │ Minecraft-specific decoding
+        ▼
+   CanonicalChunk
+        │
+        ▼
+    replay-model
+        │
+        ▼
+ future renderer / editor
+```
+
+`replay-model` does not know what a PalettedContainer, BitStorage, or Minecraft registry ID is.
+
+This allows the eventual renderer and editor to operate on canonical data rather than directly on Minecraft's network representation.
+
+## Current limitations
+
+Rewind is still early-stage.
+
+The following are intentionally not complete yet:
+
+- 3D rendering
+- Minecraft model loading
+- Texture loading
+- Lighting reconstruction
+- Full biome canonicalization
+- Complete block-entity semantics
+- Entity reconstruction
+- Replay snapshot reconstruction
+- Tick-by-tick playback
+- Seeking
+- Editing
+- Camera/keyframe tools
+- Timeline UI
+- Desktop GUI
+
+Some Minecraft data is currently preserved in raw form when its exact representation has not yet been fully validated.
+
+Rewind prefers preserving unknown data over inventing an incorrect interpretation.
 
 ## Requirements
 
-- Rust 1.88+ (`cargo`)
-- Minecraft Java 26.2 client JAR at `%APPDATA%\.minecraft\versions\26.2\26.2.jar` (for `reports/blocks.json` generation, one-time)
-- Microsoft JDK 25 (for `net.minecraft.data.Main --reports` — Adoptium 21 is blocked by Defender on this host)
+- Rust 1.88+ with Cargo.
+
+- Minecraft 26.2
+
+  A Minecraft 26.2 client JAR is currently used to derive the block-state registry:
+
+  ```
+  %APPDATA%\.minecraft\versions\26.2\26.2.jar
+  ```
+
+  The generated registry is already included in the repository, so most users do not need to regenerate it.
+
+- Java
+
+  A compatible JDK is required only when regenerating the registry from the Minecraft client JAR.
+
+  The current development environment uses Microsoft JDK 25.
 
 ## Quick start
 
-```powershell
-$env:CARGO_TARGET_DIR="C:\Users\temit\AppData\Local\Temp\opencode\flashback-target" # Defender workaround on this host; omit if target/ is excluded
+Clone the repository and build the workspace:
 
+```powershell
 cargo fmt --all
 cargo check --workspace
 cargo test --workspace -- --test-threads=1
-
-# M0 — validate container
-cargo run --bin flashback-probe -- recordings/basic/test_recording.zip
-# → target/verify-m0.json
-
-# M1 — resolve palette
-cargo run --bin flashback-idmap-probe -- recordings/basic/test_recording.zip
-# palette entry 85 -> minecraft:bedrock
-# palette entry 1 -> minecraft:stone
-# palette entry 578 -> minecraft:sandstone
-# palette entry 0 -> minecraft:air
-# → target/verify-m1.json
 ```
 
-## Registry generation (one-time, M1)
-
-If `crates/minecraft-version/data/26.2-blocks-array.json` is missing, the probe fails with a diagnostic listing `searched` paths and the exact command:
+### M0 — Validate a Flashback recording
 
 ```powershell
-$jar = "$env:APPDATA\.minecraft\versions\26.2\26.2.jar"
-$libs = (Get-Content "$env:APPDATA\.minecraft\versions\26.2\26.2.json" | ConvertFrom-Json).libraries.foreach{ "$env:APPDATA\.minecraft\libraries\$($_.downloads.artifact.path)" }
-$cp = "$jar;$($libs -join ';')"
-& "C:\Program Files\Microsoft\jdk-25.0.1.8-hotspot\bin\java.exe" -cp $cp net.minecraft.data.Main --reports --output $env:TEMP\mc-reports-26.2
-# → $env:TEMP\mc-reports-26.2\reports\blocks.json (6807038, 32366 states)
-# transform to crates/minecraft-version/data/26.2-blocks-array.json (compact, index=id)
+cargo run --bin flashback-probe -- recordings/basic/test_recording.zip
 ```
 
-The committed `26.2-blocks-array.json` (4.1 MB, `index == globalId`) is already derived from that report (`C:/.../versions/26.2/26.2.jar via ... --reports`), so most users don't need to regenerate.
+Validation output is written to:
+
+```
+target/verify-m0.json
+```
+
+### M1 — Resolve Minecraft block-state IDs
+
+```powershell
+cargo run --bin flashback-idmap-probe -- recordings/basic/test_recording.zip
+```
+
+Example resolved states:
+
+```
+85  -> minecraft:bedrock
+1   -> minecraft:stone
+578 -> minecraft:sandstone
+0   -> minecraft:air
+```
+
+Output:
+
+```
+target/verify-m1.json
+```
+
+### M2 — Build a canonical chunk
+
+```powershell
+cargo run --bin flashback-canonical-probe -- recordings/basic/test_recording.zip
+```
+
+Example:
+
+```
+Position: -7,1
+Sections: 24
+Block states: 98304
+Block entities: 0
+Lighting: preserved_raw
+Biomes: raw_preserved
+```
+
+Output:
+
+```
+target/verify-m2.json
+```
+
+## Registry generation
+
+The repository contains:
+
+```
+crates/minecraft-version/data/26.2-blocks-array.json
+```
+
+This is a compact indexed representation of the Minecraft 26.2 block-state registry.
+
+The source Minecraft report contains:
+
+- 32366 block states
+- IDs 0..32365
+- 0: air
+- 1: stone
+- 85: bedrock
+- 3907: oak_stairs
+
+The registry is indexed by the original Minecraft global block-state ID.
+
+If the generated registry needs to be reproduced, Minecraft's data generator can create `reports/blocks.json` from the 26.2 client JAR.
 
 ## Workspace
 
 ```
 Rewind/
-├── Cargo.toml                # workspace (flashback-format, minecraft-version, replay-model, app)
+├── Cargo.toml
+│
 ├── crates/
-│   ├── flashback-format/     # ZIP, VarInt, Identifier, TLV, chunk, cache — Minecraft-agnostic
-│   ├── minecraft-version/    # 26.2 registry + PalettedContainer → CanonicalBlockState
-│   │   └── data/26.2-blocks-array.json
-│   ├── replay-model/         # minimal ValidatedReplaySummary (future CanonicalReplay)
+│   ├── flashback-format/
+│   │   └── # Flashback ZIP/container format
+│   │
+│   ├── minecraft-version/
+│   │   ├── data/
+│   │   │   └── 26.2-blocks-array.json
+│   │   └── # Minecraft 26.2 decoding
+│   │
+│   ├── replay-model/
+│   │   └── # Version-independent canonical replay data
+│   │
 │   └── app/
 │       └── src/bin/
-│           ├── flashback-probe.rs        # M0
-│           └── flashback-idmap-probe.rs  # M1
-└── recordings/               # samples (gitignored except .gitkeep)
+│           ├── flashback-probe.rs
+│           ├── flashback-idmap-probe.rs
+│           └── flashback-canonical-probe.rs
+│
+└── recordings/
+    └── # Local test recordings
 ```
 
-`flashback-format` never sees `minecraft:air`; `minecraft-version` never sees `0xD780E884`.
+The core separation is intentional:
+
+```
+flashback-format
+    knows Flashback
+
+minecraft-version
+    knows Minecraft
+
+replay-model
+    knows neither
+```
 
 ## Validation
 
-All three `.flashback` samples `26.2/4903/776` byte-validate:
+Rewind has been validated against real Flashback recordings.
 
-- `basic/test_recording.zip` — 916t, `c0` 193471 `930+8690` TLV, `next_tick 916`, cache 964×9338
-- `basic/test_recording_2.zip` — 2242t, `c0` 189254 `544+24795` TLV, cache 1022
-- `chunks/test_recording3.zip` — 2341t `1311+1030` (Changed Dimension @1311), `c0` 188845 `350+21328`, `c1` 179690 `54+14997`, cache 1654
+- **test_recording.zip**
+  - 916 ticks
+  - 24 sections decoded
+  - 98,304 canonical block states
+  - 0 unresolved block-state IDs
+  - 0 block entities
+- **test_recording_2.zip**
+  - 2242 ticks
+  - First section decoded
+  - 4,096 canonical block states
+  - 9 block entities
+  - Block entity NBT preserved
 
-M1 palette: `test_recording.zip` first cache entry → 24 sections, 27 palette entries, 4 distinct (`0:air,1:stone,85:bedrock,578:sandstone`) all resolved; `test_recording_2.zip` → 1 section (lenient) 26 entries (`bedrock, deepslate[axis=y], lava[level=0], air, sculk...`).
+  This recording currently exposes an unresolved later-section decoding edge case.
+
+- **test_recording3.zip**
+  - 2341 ticks
+  - 9 sections decoded
+  - 36,864 canonical block states
+  - 0 unresolved block-state IDs
+
+  This recording currently exposes a later-section decoding edge case.
+
+These failures are retained as validation targets rather than being hidden by weakening the decoder.
+
+## Architecture
+
+Rewind is being built in layers.
+
+```
+┌───────────────────────────────┐
+│         Desktop UI            │
+├───────────────────────────────┤
+│       Timeline / Editor       │
+├───────────────────────────────┤
+│        Scene Evaluation       │
+├───────────────────────────────┤
+│       Canonical Replay        │
+├───────────────────────────────┤
+│      Minecraft Version        │
+├───────────────────────────────┤
+│       Flashback Format        │
+└───────────────────────────────┘
+```
+
+The version-specific layer is deliberately isolated so that Minecraft protocol and registry details do not leak into the canonical replay representation.
+
+The eventual goal is to support the same general principle for more Minecraft versions:
+
+```
+Minecraft recording
+       │
+       ▼
+version adapter
+       │
+       ▼
+canonical replay model
+       │
+       ▼
+version-independent renderer/editor
+```
+
+## Roadmap
+
+- **M0 — Format archaeology**
+  - Flashback ZIP parsing
+  - Replay chunk framing
+  - Dynamic action tables
+  - Snapshot/TLV parsing
+  - Chunk-cache parsing
+  - Tick validation
+- **M1 — Minecraft decoding**
+  - Minecraft 26.2 registry
+  - Block-state ID resolution
+  - PalettedContainer decoding
+  - BitStorage expansion
+  - Real-recording validation
+- **M2 — Canonical chunks**
+  - CanonicalBlockState
+  - CanonicalChunk
+  - Canonical sections
+  - Block entity preservation
+  - Heightmap decoding
+  - Raw lighting preservation
+  - Raw biome preservation
+  - Real-recording validation
+- **M3 — Replay state**
+  - Decode replay snapshots into canonical state
+  - Construct initial world state
+  - Track dimensions
+  - Track chunks
+  - Track entities
+  - Track local player
+  - Track world time
+  - Track scoreboard/border/spawn state
+  - Preserve unknown actions safely
+- **M4 — Playback**
+  - Apply replay actions to canonical state
+  - Advance state tick-by-tick
+  - Reconstruct state at arbitrary ticks
+  - Handle dimension changes
+  - Validate playback against recordings
+- **M5 — Seeking**
+  - Snapshot-based seeking
+  - Forward replay
+  - Backward seeking
+  - State checkpoints
+  - Random-access validation
+- **M6 — Scene representation**
+  - Renderable world representation
+  - Entity scene representation
+  - Camera representation
+  - Lighting representation
+  - Asset abstraction
+- **M7 — Rendering**
+  - GPU renderer
+  - Minecraft block models
+  - Textures
+  - Entities
+  - Lighting
+  - Transparency
+  - Chunk meshing
+- **M8 — Desktop editor**
+  - Timeline
+  - Camera/keyframes
+  - Playback controls
+  - World navigation
+  - Recording inspector
+  - Editing tools
+  - Export
+
+## Philosophy
+
+Rewind is being developed from the recording bytes outward.
+
+When documentation, source-code assumptions, and actual recordings disagree, real recording data is treated as the final authority.
+
+The project also deliberately avoids pretending that an unknown format is understood.
+
+When a representation is not yet validated, Rewind preserves it rather than silently converting it into an incorrect abstraction.
 
 ## License
 
