@@ -43,6 +43,8 @@ pub struct CanonicalEntity {
     pub entity_id: i32,
     pub entity_type: Option<String>, // e.g., `minecraft:zombie` if known
     pub pos: Option<[f64; 3]>,
+    #[serde(default)]
+    pub velocity: Option<[f64; 3]>,
     pub dimension: Option<String>,
     pub raw_data: Option<serde_json::Value>, // preserved raw where decoding not complete
 }

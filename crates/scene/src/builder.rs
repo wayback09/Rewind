@@ -59,6 +59,7 @@ impl<'a> SceneBuilder<'a> {
                 entity_id: e.entity_id,
                 entity_type: e.entity_type.clone(),
                 pos: e.pos,
+                velocity: e.velocity,
                 dimension: e.dimension.clone(),
                 renderable,
                 asset,
@@ -253,9 +254,11 @@ impl<'a> SceneBuilder<'a> {
         let mut is_empty = sec.non_empty_block_count == 0;
         // If empty, we know has_renderable false and is_empty true, just need one key (air)
         if is_empty {
-            let asset = provider.block_model(&sec.block_states[0]);
-            keys.push(asset.key.clone());
-            seen.insert(asset.key.clone());
+            for m in provider.block_models(&sec.block_states[0]) {
+                if seen.insert(m.asset.key.clone()) {
+                    keys.push(m.asset.key.clone());
+                }
+            }
             has_renderable = false;
         } else {
             // Non-empty: need to find distinct renderable set. Sample up to palette_size distinct.
@@ -264,14 +267,15 @@ impl<'a> SceneBuilder<'a> {
                 if seen.len() >= palette_target {
                     break;
                 }
-                let asset = provider.block_model(state);
-                let renderable =
-                    !state.is_air() && asset.status == crate::asset::AssetStatus::Known;
-                if renderable {
-                    has_renderable = true;
-                }
-                if seen.insert(asset.key.clone()) {
-                    keys.push(asset.key);
+                for m in provider.block_models(state) {
+                    let renderable =
+                        !state.is_air() && m.asset.status == crate::asset::AssetStatus::Known;
+                    if renderable {
+                        has_renderable = true;
+                    }
+                    if seen.insert(m.asset.key.clone()) {
+                        keys.push(m.asset.key.clone());
+                    }
                 }
                 if palette_target == 1 {
                     break;
@@ -284,8 +288,9 @@ impl<'a> SceneBuilder<'a> {
             // In case palette_size underestimates distinct (e.g., 4096 expanded but palette_size small),
             // ensure at least one non-air key if non_empty>0
             if keys.is_empty() && !sec.block_states.is_empty() {
-                let asset = provider.block_model(&sec.block_states[0]);
-                keys.push(asset.key.clone());
+                for m in provider.block_models(&sec.block_states[0]) {
+                    keys.push(m.asset.key.clone());
+                }
             }
         }
         let blocks = if is_large {

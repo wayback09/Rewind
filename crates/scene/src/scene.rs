@@ -144,6 +144,7 @@ pub struct SceneEntity {
     pub entity_id: i32,
     pub entity_type: Option<String>,
     pub pos: Option<[f64; 3]>,
+    pub velocity: Option<[f64; 3]>,
     pub dimension: Option<String>,
     pub renderable: bool,
     pub asset: Option<AssetRef>,

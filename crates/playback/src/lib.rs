@@ -65,6 +65,11 @@ impl ReplayStateSummary {
                 fnv(&mut hash, &pos[1].to_le_bytes());
                 fnv(&mut hash, &pos[2].to_le_bytes());
             }
+            if let Some(vel) = e.velocity {
+                fnv(&mut hash, &vel[0].to_le_bytes());
+                fnv(&mut hash, &vel[1].to_le_bytes());
+                fnv(&mut hash, &vel[2].to_le_bytes());
+            }
             if let Some(dim) = &e.dimension {
                 fnv(&mut hash, dim.as_bytes());
             }
@@ -865,6 +870,7 @@ impl<'a> ReplayPlayer<'a> {
                     entity_id: eid,
                     entity_type: None, // type not known from move_entities alone
                     pos: Some([x, y, z]),
+                    velocity: None,
                     dimension: Some(dim_str.clone()),
                     raw_data: Some(serde_json::json!({
                         "yaw": yaw,
@@ -897,9 +903,36 @@ impl<'a> ReplayPlayer<'a> {
         let (packet_id, n) =
             read_varint(payload, 0).map_err(|e| format!("packetId: {}", e.message))?;
         let inner = &payload[n..];
-        // For M4, we handle a few known packet types where the payload is small and we can decode confidently
-        // Otherwise, preserve as unknown
+        // M6.1: game_packet 101 is set_entity_motion (LpVec3). Handle it explicitly.
+        // Also handle 99 as alias for same (decompiled 26.2.jar shows 99, recordings show 101 due to Flashback build).
         match packet_id {
+            101 => {
+                // ClientboundSetEntityMotionPacket: VarInt entityId + LpVec3 velocity (M6.1: 101 dominant in recordings, 63% of game_packets)
+                let (eid, m) =
+                    read_varint(inner, 0).map_err(|e| format!("motion eid: {}", e.message))?;
+                if eid < 0 {
+                    return Err(format!("motion negative eid {}", eid));
+                }
+                let (vel, _) =
+                    Self::decode_lpvec3(inner, m).map_err(|e| format!("LpVec3: {}", e))?;
+                // Update or create entity velocity
+                if let Some(ent) = state.entities.iter_mut().find(|e| e.entity_id == eid) {
+                    ent.velocity = Some(vel);
+                    if ent.pos.is_none() {
+                        ent.pos = Some([0.0, 0.0, 0.0]);
+                    }
+                } else {
+                    state.entities.push(replay_model::CanonicalEntity {
+                        entity_id: eid,
+                        entity_type: None,
+                        pos: None,
+                        velocity: Some(vel),
+                        dimension: Some(state.dimension.0.clone()),
+                        raw_data: None,
+                    });
+                }
+                return Ok("applied".to_string());
+            }
             // Priority: dimension changes, time, border, etc.
             // But we need to know the packetId mapping for 26.2 / 776
             // From research, snapshot game packets include: login (dim), player info, border, time, spawn, etc.
@@ -951,6 +984,54 @@ impl<'a> ReplayPlayer<'a> {
                 Err(format!("unknown game packet id {}", packet_id))
             }
         }
+    }
+
+    fn decode_lpvec3(bytes: &[u8], off: usize) -> Result<([f64; 3], usize), String> {
+        if off >= bytes.len() {
+            return Err("LpVec3 truncated at header".into());
+        }
+        let h = bytes[off] as u32;
+        if h == 0 {
+            return Ok(([0.0, 0.0, 0.0], 1));
+        }
+        if off + 6 > bytes.len() {
+            return Err("LpVec3 truncated at body".into());
+        }
+        let b2 = bytes[off + 1] as u64;
+        let int_part = u32::from_be_bytes([
+            bytes[off + 2],
+            bytes[off + 3],
+            bytes[off + 4],
+            bytes[off + 5],
+        ]) as u64;
+        let mut packed: u64 = (int_part << 16) | (b2 << 8) | h as u64;
+        let mut consumed = 6;
+        // hasContinuationBit -> bit 2 set
+        let has_cont = (h & 4) != 0;
+        let mut scale: u64 = (h & 3) as u64;
+        if has_cont {
+            if off + 6 >= bytes.len() {
+                return Err("LpVec3 truncated at scale VarInt".into());
+            }
+            let (sv, n) = read_varint(bytes, off + 6)
+                .map_err(|e| format!("LpVec3 scale VarInt: {}", e.message))?;
+            if sv < 0 {
+                return Err("LpVec3 negative scale".into());
+            }
+            scale = (scale | ((sv as u64 & 0xFFFFFFFF) << 2)) as u64;
+            consumed += n;
+        }
+        let scale_f = scale as f64;
+        // unpack helper: ((bits & 32767) as f64).min(32766.0) *2.0/32766.0 -1.0
+        fn unpack(bits: u64) -> f64 {
+            let v = (bits & 32767) as f64;
+            let vv = v.min(32766.0);
+            vv * 2.0 / 32766.0 - 1.0
+        }
+        let x = unpack(packed >> 3) * scale_f;
+        let y = unpack(packed >> 18) * scale_f;
+        let z = unpack(packed >> 33) * scale_f;
+        Ok(([x, y, z], consumed))
     }
 }
 

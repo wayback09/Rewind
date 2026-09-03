@@ -83,7 +83,10 @@ pub fn diff(a: &Scene, b: &Scene) -> SceneDiff {
         } else {
             let ea = a.entities.iter().find(|e| e.entity_id == *id).unwrap();
             let eb = b.entities.iter().find(|e| e.entity_id == *id).unwrap();
-            if ea.pos != eb.pos || ea.entity_type != eb.entity_type || ea.dimension != eb.dimension
+            if ea.pos != eb.pos
+                || ea.velocity != eb.velocity
+                || ea.entity_type != eb.entity_type
+                || ea.dimension != eb.dimension
             {
                 entity_diffs.push(EntityDiff::Changed { entity_id: *id });
             }

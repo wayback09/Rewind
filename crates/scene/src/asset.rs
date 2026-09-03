@@ -47,11 +47,64 @@ impl AssetRef {
     }
 }
 
+/// Stable texture identifier (e.g., `minecraft:block/stone`).
+pub type TextureKey = String;
+/// Stable model identifier (e.g., `minecraft:block/oak_stairs`).
+pub type ModelKey = String;
+
+/// Per-model instance for a block state. A single state can resolve to multiple
+/// instances (multipart). Each instance may carry a rotation and weight.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct BlockModelRef {
+    /// Model key as in `assets/minecraft/models/block/<key>.json` (without prefix).
+    pub key: ModelKey,
+    /// Rotation around X (0,90,180,270).
+    pub x: i32,
+    /// Rotation around Y (0,90,180,270).
+    pub y: i32,
+    /// Whether UV lock is enabled for this instance.
+    pub uvlock: bool,
+    /// Weight for random variants (default 1).
+    pub weight: u32,
+    /// Resolved asset reference (Known/Unavailable).
+    pub asset: AssetRef,
+}
+
+impl BlockModelRef {
+    pub fn new(key: impl Into<String>, asset: AssetRef) -> Self {
+        Self {
+            key: key.into(),
+            x: 0,
+            y: 0,
+            uvlock: false,
+            weight: 1,
+            asset,
+        }
+    }
+}
+
 /// Renderer-facing asset provider — behind a trait so Scene stays independent of
 /// filesystem layout, .minecraft location, network, etc.
 pub trait AssetProvider: Send + Sync {
-    /// Resolve a block state's model.
-    fn block_model(&self, state: &CanonicalBlockState) -> AssetRef;
+    /// Resolve a block state's model (single). Default impl delegates to `block_models` first entry.
+    /// For multipart blocks, prefer `block_models`.
+    fn block_model(&self, state: &CanonicalBlockState) -> AssetRef {
+        self.block_models(state)
+            .into_iter()
+            .next()
+            .map(|m| m.asset)
+            .unwrap_or_else(|| AssetRef::unavailable(state.name.clone(), "no model"))
+    }
+    /// Resolve a block state's models (variant or multipart). Default uses `block_model` for backwards compat.
+    fn block_models(&self, state: &CanonicalBlockState) -> Vec<BlockModelRef> {
+        vec![BlockModelRef::new(
+            format!(
+                "minecraft:block/{}",
+                state.name.trim_start_matches("minecraft:")
+            ),
+            self.block_model(state),
+        )]
+    }
     /// Resolve an entity type's model.
     fn entity_model(&self, entity_type: &str) -> AssetRef;
     /// Resolve a block entity type's model.

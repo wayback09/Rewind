@@ -10,7 +10,9 @@ pub mod diff;
 pub mod fingerprint;
 pub mod scene;
 
-pub use asset::{AssetProvider, AssetRef, AssetStatus, StubAssetProvider};
+pub use asset::{
+    AssetProvider, AssetRef, AssetStatus, BlockModelRef, ModelKey, StubAssetProvider, TextureKey,
+};
 pub use builder::SceneBuilder;
 pub use coordinates::{
     chunk_origin, index_to_local, local_to_index, local_to_world, section_y_to_y_base,

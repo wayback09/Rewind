@@ -8,6 +8,7 @@
 //!
 //! flashback-format → raw bytes → minecraft-version → CanonicalBlockState
 
+pub mod block_entity_registry;
 pub mod chunk;
 pub mod palette;
 pub mod registry;

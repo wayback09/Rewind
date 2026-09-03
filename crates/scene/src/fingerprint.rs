@@ -53,6 +53,11 @@ pub fn fingerprint(scene: &Scene) -> u64 {
             fnv(&p[1].to_le_bytes());
             fnv(&p[2].to_le_bytes());
         }
+        if let Some(v) = e.velocity {
+            fnv(&v[0].to_le_bytes());
+            fnv(&v[1].to_le_bytes());
+            fnv(&v[2].to_le_bytes());
+        }
     }
     if let Some(lp) = &scene.local_player {
         fnv(lp.uuid.as_bytes());

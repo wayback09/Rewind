@@ -207,15 +207,13 @@ pub fn decode_canonical_chunk(
         off += consumed;
 
         // Resolve block entity type name via registry? For now, keep as string "type_{id}" and also try to resolve via BlockEntityType registry if available.
-        // For M2, we preserve the numeric type id as string and also try to map via known types for 26.2.
-        // We have no BlockEntityType IdMap yet, so we keep as `minecraft:unknown_{id}` and preserve NBT which contains symbolic `id` like "minecraft:spawner" for some.
-        // The NBT itself often contains the block entity id as string, e.g., for spawner, the NBT has no explicit id, but the type is separate.
-        // For now, use `type_{id}` and also try to extract from NBT if it has "id" field.
+        // M6.1: Use 26.2 BlockEntityType registry to resolve numeric id to symbolic name.
+        // NBT `id` field (if present) is authoritative per instance; otherwise use registry table.
         let type_name = if let Some(serde_json::Value::String(s)) = tag_value.get("id") {
             s.clone()
+        } else if let Some(name) = crate::block_entity_registry::name_for_id(type_id as u32) {
+            name.to_string()
         } else {
-            // Try to map known type ids for 26.2: we can hardcode a few, but spec says do not hardcode.
-            // For M2, keep as `minecraft:block_entity_type_{id}` and preserve NBT.
             format!("minecraft:block_entity_type_{}", type_id)
         };
 
