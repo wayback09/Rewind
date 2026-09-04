@@ -3,6 +3,7 @@
 use crate::mesh::SectionMesh;
 use crate::SectionKey;
 use std::collections::HashMap;
+use wgpu::util::DeviceExt;
 
 pub struct RenderCache {
     pub meshes: HashMap<SectionKey, GpuSectionMesh>,

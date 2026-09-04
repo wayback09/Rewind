@@ -64,6 +64,7 @@ pub fn generate_section_mesh(
     section: &scene::SceneSection,
     chunk_x: i32,
     chunk_z: i32,
+    scene: &scene::Scene,
     provider: &mut JarAssetProvider,
     texture_set: &mut HashSet<String>,
 ) -> Result<SectionMesh, String> {
@@ -79,6 +80,7 @@ pub fn generate_section_mesh(
         section.y_base,
         chunk_x,
         chunk_z,
+        scene,
         provider,
         texture_set,
     )
@@ -89,6 +91,7 @@ fn generate_from_blocks(
     y_base: i32,
     chunk_x: i32,
     chunk_z: i32,
+    scene: &scene::Scene,
     provider: &mut JarAssetProvider,
     texture_set: &mut HashSet<String>,
 ) -> Result<SectionMesh, String> {
@@ -138,10 +141,7 @@ fn generate_from_blocks(
                             wx,
                             wy,
                             wz,
-                            blocks,
-                            chunk_x,
-                            chunk_z,
-                            y_base,
+                            scene,
                             &mut full_cube_cache,
                             provider,
                         ) {
@@ -177,10 +177,39 @@ fn generate_from_blocks(
     })
 }
 
+fn is_transparent_block(name: &str) -> bool {
+    matches!(
+        name,
+        "minecraft:water"
+            | "minecraft:lava"
+            | "minecraft:glass"
+            | "minecraft:glass_pane"
+            | "minecraft:ice"
+            | "minecraft:barrier"
+            | "minecraft:air"
+    ) || name.ends_with("_glass")
+        || name.ends_with("_leaves")
+        || name.contains("vine")
+        || name.contains("flower")
+        || name.contains("tall_grass")
+        || name.contains("snow")
+        || name == "minecraft:grass"
+        || name == "minecraft:fern"
+        || name.contains("sapling")
+        || name.contains("door")
+        || name.contains("trapdoor")
+        || name.contains("fence")
+        || name.contains("pane")
+        || name.contains("wall")
+}
+
 fn is_state_full_cube(
     state: &replay_model::CanonicalBlockState,
     provider: &mut JarAssetProvider,
 ) -> bool {
+    if is_transparent_block(&state.name) {
+        return false;
+    }
     let refs = match crate::blockstate::resolve_blockstate(state, provider, None) {
         Ok(r) => r,
         Err(_) => return false,
@@ -205,10 +234,7 @@ fn should_cull(
     wx: i32,
     wy: i32,
     wz: i32,
-    blocks: &[replay_model::CanonicalBlockState],
-    chunk_x: i32,
-    chunk_z: i32,
-    y_base: i32,
+    scene: &scene::Scene,
     cache: &mut HashMap<String, bool>,
     provider: &mut JarAssetProvider,
 ) -> bool {
@@ -223,24 +249,35 @@ fn should_cull(
     };
     let n_cx = nx.div_euclid(16);
     let n_cz = nz.div_euclid(16);
-    if n_cx != chunk_x || n_cz != chunk_z {
-        return false;
-    }
     let n_sy = ny.div_euclid(16);
-    if n_sy != y_base.div_euclid(16) {
+    // Look up neighbor chunk
+    let chunk = match scene.chunks.get(&(n_cx, n_cz)) {
+        Some(c) => c,
+        None => return false,
+    };
+    let sec = match chunk.sections.iter().find(|s| s.section_y == n_sy) {
+        Some(s) => s,
+        None => return false,
+    };
+    if sec.blocks.is_empty() {
+        // Fast path: use non_empty as proxy (if is_empty true => air)
+        if sec.is_empty {
+            return false;
+        }
+        // For fast path we can't know per-block, so don't cull (conservative)
         return false;
     }
-    let nlx = nx.rem_euclid(16) as usize;
-    let nly = (ny - y_base) as usize;
-    let nlz = nz.rem_euclid(16) as usize;
-    if nly >= 16 {
+    let lx = nx.rem_euclid(16) as usize;
+    let ly = (ny - sec.y_base) as usize;
+    let lz = nz.rem_euclid(16) as usize;
+    if ly >= 16 {
         return false;
     }
-    let nidx = (nly * 16 + nlz) * 16 + nlx;
-    if nidx >= blocks.len() {
+    let nidx = (ly * 16 + lz) * 16 + lx;
+    if nidx >= sec.blocks.len() {
         return false;
     }
-    let nstate = &blocks[nidx];
+    let nstate = &sec.blocks[nidx];
     if nstate.name == "minecraft:air" {
         return false;
     }

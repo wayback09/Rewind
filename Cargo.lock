@@ -76,13 +76,17 @@ name = "app"
 version = "0.1.0"
 dependencies = [
  "flashback-format",
+ "glam",
  "minecraft-version",
  "playback",
+ "pollster",
  "renderer",
  "replay-model",
  "scene",
  "serde",
  "serde_json",
+ "wgpu",
+ "winit",
 ]
 
 [[package]]

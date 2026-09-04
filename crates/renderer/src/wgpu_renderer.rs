@@ -1,11 +1,13 @@
 //! Wgpu backend — device, pipeline, draw.
 
-use crate::cache::{build_gpu_mesh, RenderCache, SectionKey};
+use crate::cache::{build_gpu_mesh, RenderCache};
 use crate::camera::{Camera, CameraUniform};
 use crate::mesh::{SectionMesh, Vertex};
 use crate::texture::TextureAtlas;
+use crate::SectionKey;
 use glam::Vec3;
 use std::collections::HashSet;
+use wgpu::util::DeviceExt;
 
 pub struct WgpuState {
     pub device: wgpu::Device,
@@ -201,6 +203,7 @@ impl WgpuState {
                 color_attachments: &[Some(wgpu::RenderPassColorAttachment {
                     view: &view,
                     resolve_target: None,
+                    depth_slice: None,
                     ops: wgpu::Operations {
                         load: wgpu::LoadOp::Clear(wgpu::Color {
                             r: 0.53,
