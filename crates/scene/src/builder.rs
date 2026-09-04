@@ -293,14 +293,7 @@ impl<'a> SceneBuilder<'a> {
                 }
             }
         }
-        let blocks = if is_large {
-            // For large scenes (>100 chunks), avoid duplicating 54M states (26s). Store empty
-            // and rely on total_blocks / non_empty for summary. Fingerprint for large uses
-            // chunk positions + non_empty, not per-block names, so still deterministic.
-            Vec::new()
-        } else {
-            sec.block_states.clone()
-        };
+        let blocks = sec.block_states.clone();
         let scene_sec = SceneSection {
             section_y: sec.section_y,
             y_base: sec.y_base,

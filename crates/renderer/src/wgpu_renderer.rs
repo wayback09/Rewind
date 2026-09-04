@@ -22,6 +22,7 @@ pub struct WgpuState {
     pub camera_uniform: CameraUniform,
     pub atlas: Option<TextureAtlas>,
     pub cache: RenderCache,
+    pub clear_color: wgpu::Color,
 }
 
 impl WgpuState {
@@ -127,7 +128,36 @@ impl WgpuState {
             camera_uniform: uniform,
             atlas: None,
             cache: RenderCache::new(),
+            clear_color: wgpu::Color {
+                r: 0.53,
+                g: 0.81,
+                b: 0.92,
+                a: 1.0,
+            },
         }
+    }
+
+    pub fn set_dimension(&mut self, dim: &str) {
+        self.clear_color = match dim {
+            "minecraft:the_nether" => wgpu::Color {
+                r: 0.08,
+                g: 0.02,
+                b: 0.02,
+                a: 1.0,
+            },
+            "minecraft:the_end" => wgpu::Color {
+                r: 0.05,
+                g: 0.05,
+                b: 0.12,
+                a: 1.0,
+            },
+            _ => wgpu::Color {
+                r: 0.53,
+                g: 0.81,
+                b: 0.92,
+                a: 1.0,
+            },
+        };
     }
 
     pub fn resize(&mut self, width: u32, height: u32) {
@@ -153,6 +183,7 @@ impl WgpuState {
         });
         self.depth_view = depth.create_view(&wgpu::TextureViewDescriptor::default());
         self.camera.aspect = width as f32 / height as f32;
+        self.update_camera();
     }
 
     pub fn update_camera(&mut self) {
@@ -205,12 +236,7 @@ impl WgpuState {
                     resolve_target: None,
                     depth_slice: None,
                     ops: wgpu::Operations {
-                        load: wgpu::LoadOp::Clear(wgpu::Color {
-                            r: 0.53,
-                            g: 0.81,
-                            b: 0.92,
-                            a: 1.0,
-                        }),
+                        load: wgpu::LoadOp::Clear(self.clear_color),
                         store: wgpu::StoreOp::Store,
                     },
                 })],

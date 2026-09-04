@@ -448,6 +448,7 @@ pub fn run_blocking(scene: scene::Scene) {
     wgpu_state.camera.yaw = init_yaw;
     wgpu_state.camera.pitch = init_pitch;
     wgpu_state.update_camera();
+    wgpu_state.set_dimension(&scene.environment.dimension);
     wgpu_state.build_atlas(&provider, &texture_keys);
     let atlas_map = wgpu_state
         .atlas

@@ -123,6 +123,7 @@ fn run(path: PathBuf, init_tick: u32) {
         wgpu_state.camera.yaw = yaw;
         wgpu_state.camera.pitch = pitch;
         wgpu_state.update_camera();
+        wgpu_state.set_dimension(&scene.environment.dimension);
     }
 
     let mut last_scene = scene.clone();
@@ -215,6 +216,9 @@ fn run(path: PathBuf, init_tick: u32) {
                                                     new_scene.environment.dimension
                                                 );
                                                 wgpu_state.cache.clear();
+                                                wgpu_state.set_dimension(
+                                                    &new_scene.environment.dimension,
+                                                );
                                             }
                                             last_scene = new_scene.clone();
                                             let (new_meshes, new_tex) =
@@ -409,6 +413,7 @@ fn run(path: PathBuf, init_tick: u32) {
                             let diff = scene::diff(&last_scene, &new_scene);
                             if diff.environment_changed {
                                 wgpu_state.cache.clear();
+                                wgpu_state.set_dimension(&new_scene.environment.dimension);
                             }
                             last_scene = new_scene.clone();
                             let (new_meshes, new_tex) = renderer::build_world_meshes(
