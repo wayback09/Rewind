@@ -1,0 +1,24 @@
+[package]
+name = "renderer"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "M7 CPU→GPU renderer on top of Scene (wgpu)"
+
+[features]
+default = []
+window = ["dep:wgpu", "dep:winit", "dep:image", "dep:pollster"]
+
+[dependencies]
+scene = { path = "../scene" }
+replay-model = { path = "../replay-model" }
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+thiserror = "1.0"
+glam = "0.30"
+wgpu = { version = "26", optional = true }
+winit = { version = "0.30", optional = true }
+image = { version = "0.25", default-features = false, features = ["png"], optional = true }
+zip = { version = "2.2", default-features = false, features = ["deflate"] }
+pollster = { version = "0.4", optional = true }
+bytemuck = { version = "1.16", features = ["derive"] }

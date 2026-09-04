@@ -29,11 +29,21 @@ path = "src/bin/flashback-seek-probe.rs"
 name = "flashback-scene-probe"
 path = "src/bin/flashback-scene-probe.rs"
 
+[[bin]]
+name = "flashback-render"
+path = "src/bin/flashback-render.rs"
+required-features = ["render"]
+
+[features]
+default = []
+render = ["renderer/window"]
+
 [dependencies]
 flashback-format = { path = "../flashback-format" }
 minecraft-version = { path = "../minecraft-version" }
 replay-model = { path = "../replay-model" }
 playback = { path = "../playback" }
 scene = { path = "../scene" }
+renderer = { path = "../renderer", optional = true }
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"

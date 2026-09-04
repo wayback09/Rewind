@@ -6,6 +6,7 @@ members = [
     "crates/app",
     "crates/playback",
     "crates/scene",
+    "crates/renderer",
 ]
 resolver = "2"
 
