@@ -221,22 +221,28 @@ pub fn decode_snapshot_with_data(
                     ]);
                     lp.pos = [x, y, z];
                     off += 24;
-                    if payload.len() >= off + 8 {
-                        let yaw = f32::from_be_bytes([
+                    if payload.len() >= off + 12 {
+                        let x_rot = f32::from_be_bytes([
                             payload[off],
                             payload[off + 1],
                             payload[off + 2],
                             payload[off + 3],
                         ]);
-                        let pitch = f32::from_be_bytes([
+                        let y_rot = f32::from_be_bytes([
                             payload[off + 4],
                             payload[off + 5],
                             payload[off + 6],
                             payload[off + 7],
                         ]);
-                        lp.yaw = yaw;
-                        lp.pitch = pitch;
-                        off += 8;
+                        let _y_head_rot = f32::from_be_bytes([
+                            payload[off + 8],
+                            payload[off + 9],
+                            payload[off + 10],
+                            payload[off + 11],
+                        ]);
+                        lp.yaw = y_rot;
+                        lp.pitch = x_rot;
+                        off += 12;
                     }
                     // Velocity (3 doubles) if present
                     if payload.len() >= off + 24 {
@@ -270,7 +276,12 @@ pub fn decode_snapshot_with_data(
                             payload[off + 22],
                             payload[off + 23],
                         ]);
-                        lp.velocity = Some([vx, vy, vz]);
+                        // Sanitize huge values from mis-aligned reads (should be small, <10)
+                        if vx.abs() < 100.0 && vy.abs() < 100.0 && vz.abs() < 100.0 {
+                            lp.velocity = Some([vx, vy, vz]);
+                        } else {
+                            lp.velocity = Some([0.0, 0.0, 0.0]);
+                        }
                         off += 24;
                     }
                     // GameProfile and gamemode are more complex (VarInt + JSON), we will just try to extract profile name if possible
