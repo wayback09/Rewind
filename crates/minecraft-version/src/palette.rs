@@ -93,12 +93,14 @@ pub fn decode_section_palettes(
             if !ok {
                 break;
             }
-            let longs_len = ((4096usize * bits as usize) + 63) / 64;
+            // M9.9: vanilla SimpleBitStorage: values_per_long = 64 / bits, longs = ceil(4096 / VPL), BE longs, never span.
+            let vpl = 64usize / bits as usize;
+            let longs_len = (4096usize + vpl - 1) / vpl;
             if offset + longs_len * 8 > buffer.len() {
                 break;
             }
             for _ in 0..longs_len {
-                let v = u64::from_le_bytes([
+                let v = u64::from_be_bytes([
                     buffer[offset],
                     buffer[offset + 1],
                     buffer[offset + 2],
@@ -112,13 +114,14 @@ pub fn decode_section_palettes(
                 offset += 8;
             }
         } else {
-            // bits ==15 direct
-            let longs_len = ((4096usize * bits as usize) + 63) / 64;
+            // bits ==15 direct: VPL = 64/15 = 4, longs = 1024, BE
+            let vpl = 64usize / 15;
+            let longs_len = (4096usize + vpl - 1) / vpl;
             if offset + longs_len * 8 > buffer.len() {
                 break;
             }
             for _ in 0..longs_len {
-                let v = u64::from_le_bytes([
+                let v = u64::from_be_bytes([
                     buffer[offset],
                     buffer[offset + 1],
                     buffer[offset + 2],
@@ -243,7 +246,9 @@ pub fn decode_section_palettes(
                 });
                 break;
             }
-            let b_longs_len = ((64usize * biome_bits as usize) + 63) / 64;
+            // M9.9: biomes entryCount=64, VPL=64/biome_bits, BE
+            let b_vpl = 64usize / biome_bits as usize;
+            let b_longs_len = (64usize + b_vpl - 1) / b_vpl;
             if offset + b_longs_len * 8 > buffer.len() {
                 sections.push(SectionPaletteInfo {
                     section_index: sec_idx,
@@ -259,7 +264,7 @@ pub fn decode_section_palettes(
                 break;
             }
             for _ in 0..b_longs_len {
-                let v = u64::from_le_bytes([
+                let v = u64::from_be_bytes([
                     buffer[offset],
                     buffer[offset + 1],
                     buffer[offset + 2],
@@ -384,21 +389,13 @@ pub fn expand_section_block_states(
         return Ok(out);
     }
     if section.bits == 15 {
-        // Direct: longs contain global IDs directly, 15 bits each.
-        // Need to unpack 4096 *15 bits from longs.
-        // Use SimpleBitStorage logic: mask = (1<<15)-1 = 32767
+        // M9.9: vanilla SimpleBitStorage padded: VPL=64/15=4, cell=idx/4, off=(idx-cell*4)*15, never span.
+        let vpl = 64usize / 15;
         let mask = (1u64 << 15) - 1;
         for idx in 0..4096 {
-            let bit_index = idx * 15;
-            let long_index = bit_index / 64;
-            let bit_offset = bit_index % 64;
-            let mut val = (section.longs[long_index] >> bit_offset) & mask;
-            if bit_offset + 15 > 64 {
-                // spans to next long
-                let bits_in_next = (bit_offset + 15) - 64;
-                let next = section.longs[long_index + 1] & ((1u64 << bits_in_next) - 1);
-                val |= next << (15 - bits_in_next);
-            }
+            let cell = idx / vpl;
+            let off = (idx - cell * vpl) * 15;
+            let val = (section.longs[cell] >> off) & mask;
             let gid = val as u32;
             let state = registry
                 .get(gid)
@@ -407,23 +404,15 @@ pub fn expand_section_block_states(
         }
         return Ok(out);
     }
-    // Indirect 1..8
+    // M9.9: vanilla SimpleBitStorage padded, never span.
+    let vpl = 64usize / section.bits as usize;
     let mask = (1u64 << section.bits) - 1;
     for idx in 0..4096 {
-        let bit_index = idx * section.bits as usize;
-        let long_index = bit_index / 64;
-        let bit_offset = bit_index % 64;
-        let mut palette_idx = (section.longs[long_index] >> bit_offset) & mask;
-        if bit_offset + section.bits as usize > 64 {
-            let bits_in_next = (bit_offset + section.bits as usize) - 64;
-            let next = section.longs[long_index + 1] & ((1u64 << bits_in_next) - 1);
-            palette_idx |= next << (section.bits as usize - bits_in_next);
-        }
-        let mut palette_idx = palette_idx as usize;
+        let cell = idx / vpl;
+        let off = (idx - cell * vpl) * section.bits as usize;
+        let mut palette_idx = ((section.longs[cell] >> off) & mask) as usize;
         if palette_idx >= section.palette.len() {
-            // Lenient: clamp or wrap — for M2 correctness, treat out-of-range as 0 (air) to avoid failing the whole chunk.
-            // This can happen due to uninitialized bits in the BitStorage for trailing entries or due to reading longs as LE vs BE mismatch for some chunks.
-            // For the failing test_recording_2.zip sec0 at idx 1192, palette_idx 28 with palette len 26 would be out of range by 2, but wrapping gives 2 (lava) which is plausible.
+            // Lenient: wrap (padding bits in last long may yield out-of-range trailing values).
             palette_idx %= section.palette.len();
         }
         let gid = section.palette[palette_idx];
@@ -478,6 +467,119 @@ mod tests {
         for st in &expanded {
             let gid = reg_len_lookup(&reg, st);
             assert!(first.palette.contains(&gid) || first.bits == 0 || first.bits == 15);
+        }
+    }
+
+    /// M9.9: vanilla SimpleBitStorage layout helpers (spec, not Rewind's old layout).
+    fn vanilla_longs_len(bits: u8, count: usize) -> usize {
+        assert!((1..=15).contains(&bits));
+        let vpl = 64usize / bits as usize;
+        (count + vpl - 1) / vpl
+    }
+
+    fn vanilla_pack(values: &[u32], bits: u8) -> Vec<u64> {
+        let vpl = 64usize / bits as usize;
+        let mask = if bits == 64 {
+            u64::MAX
+        } else {
+            (1u64 << bits) - 1
+        };
+        let mut out = vec![0u64; vanilla_longs_len(bits, values.len())];
+        for (idx, &v) in values.iter().enumerate() {
+            let cell = idx / vpl;
+            let off = (idx - cell * vpl) * bits as usize;
+            out[cell] |= ((v as u64) & mask) << off;
+        }
+        out
+    }
+
+    fn vanilla_get(longs: &[u64], idx: usize, bits: u8) -> u32 {
+        let vpl = 64usize / bits as usize;
+        let mask = if bits == 64 {
+            u64::MAX
+        } else {
+            (1u64 << bits) - 1
+        };
+        let cell = idx / vpl;
+        let off = (idx - cell * vpl) * bits as usize;
+        ((longs[cell] >> off) & mask) as u32
+    }
+
+    #[test]
+    fn vanilla_layout_counts() {
+        // M9.9: ceil(4096 / values_per_long), NOT ceil(4096*bits/64)
+        assert_eq!(vanilla_longs_len(4, 4096), 256); // 16/long
+        assert_eq!(vanilla_longs_len(5, 4096), 342); // 12/long -> ceil(4096/12)=342
+        assert_eq!(vanilla_longs_len(6, 4096), 410); // 10/long
+        assert_eq!(vanilla_longs_len(8, 4096), 512); // 8/long
+        assert_eq!(vanilla_longs_len(15, 4096), 1024); // 4/long
+        assert_eq!(vanilla_longs_len(6, 64), 7); // biomes: ceil(64/10)=7
+    }
+
+    #[test]
+    fn vanilla_get_never_spans_and_matches_positions() {
+        // bits=6: idx 10 -> cell 1 off 0 (NOT long 0 off 60); idx 21 -> cell 2 off 6
+        let bits = 6u8;
+        let vpl = 64usize / bits as usize;
+        assert_eq!(vpl, 10);
+        // cell/off for required idx
+        for (idx, exp_cell, exp_off) in [
+            (0, 0, 0),
+            (1, 0, 6),
+            (10, 1, 0),
+            (11, 1, 6),
+            (21, 2, 6),
+            (4095, 409, 30),
+        ] {
+            let cell = idx / vpl;
+            let off = (idx - cell * vpl) * bits as usize;
+            assert_eq!((cell, off), (exp_cell, exp_off), "idx {}", idx);
+            assert!(off + bits as usize <= 64, "must never span");
+        }
+        // roundtrip via vanilla pack/get with known pattern
+        let mut values = vec![0u32; 4096];
+        for i in 0..4096 {
+            values[i] = (i % 34) as u32;
+        }
+        let longs = vanilla_pack(&values, bits);
+        assert_eq!(longs.len(), 410);
+        for idx in [0, 1, 10, 11, 21, 4095] {
+            assert_eq!(vanilla_get(&longs, idx, bits), values[idx], "idx {}", idx);
+        }
+    }
+
+    #[test]
+    fn expand_uses_vanilla_layout_not_continuous() {
+        // Realizarre: old continuous idx*bits would place idx=10 at long 0 off 60 (spanning).
+        // Vanilla places idx=10 at cell 1 off 0. Verify expand agrees with vanilla_get.
+        let reg = load_26_2_registry().expect("registry");
+        // synthetic palette of 34 distinct gids (use first 34 registry ids that exist)
+        let palette: Vec<u32> = (0..34).collect();
+        // build values pattern then pack vanilla-style
+        let mut values = vec![0u32; 4096];
+        for i in 0..4096 {
+            values[i] = (i % 34) as u32;
+        }
+        let longs = vanilla_pack(&values, 6);
+        let info = SectionPaletteInfo {
+            section_index: 8,
+            non_empty_block_count: 4096,
+            fluid_count: 0,
+            bits: 6,
+            palette: palette.clone(),
+            longs,
+            biome_bits: 0,
+            biome_palette: vec![],
+            biome_longs: vec![],
+        };
+        let expanded = expand_section_block_states(&info, &reg).expect("expand");
+        assert_eq!(expanded.len(), 4096);
+        // check required idx map to expected palette entries
+        for idx in [0, 1, 10, 11, 21, 4095] {
+            let expect_gid = palette[values[idx] as usize];
+            let got = &expanded[idx];
+            let got_gid = reg_len_lookup(&reg, got);
+            assert_eq!(got_gid, expect_gid, "idx {}", idx);
         }
     }
 

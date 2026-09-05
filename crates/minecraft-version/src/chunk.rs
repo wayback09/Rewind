@@ -81,7 +81,8 @@ pub fn decode_canonical_chunk(
         }
         let mut longs = Vec::with_capacity(arr_len as usize);
         for _ in 0..arr_len {
-            let v = u64::from_le_bytes([
+            // M9.9: longs on wire are BE (ByteBuf.writeLong)
+            let v = u64::from_be_bytes([
                 packet_bytes[off],
                 packet_bytes[off + 1],
                 packet_bytes[off + 2],
@@ -342,29 +343,21 @@ fn expand_section(
         return Ok(out);
     }
     if section.bits == 15 {
-        // Direct
+        // M9.9: vanilla padded VPL=4, never span.
+        let vpl = 64usize / 15;
         let mask = (1u64 << 15) - 1;
         for idx in 0..4096 {
-            let bit_index = idx * 15;
-            let long_index = bit_index / 64;
-            let bit_offset = bit_index % 64;
-            if long_index >= section.longs.len() {
+            let cell = idx / vpl;
+            if cell >= section.longs.len() {
                 return Err(format!(
-                    "long_index {} out of range {} at idx {}",
-                    long_index,
+                    "cell {} out of range {} at idx {}",
+                    cell,
                     section.longs.len(),
                     idx
                 ));
             }
-            let mut val = (section.longs[long_index] >> bit_offset) & mask;
-            if bit_offset + 15 > 64 {
-                let bits_in_next = (bit_offset + 15) - 64;
-                if long_index + 1 >= section.longs.len() {
-                    return Err(format!("need next long at idx {}", idx));
-                }
-                let next = section.longs[long_index + 1] & ((1u64 << bits_in_next) - 1);
-                val |= next << (15 - bits_in_next);
-            }
+            let off = (idx - cell * vpl) * 15;
+            let val = (section.longs[cell] >> off) & mask;
             let gid = val as u32;
             let state = registry
                 .get(gid)
@@ -373,30 +366,21 @@ fn expand_section(
         }
         return Ok(out);
     }
-    // Indirect 1..8
+    // M9.9: vanilla padded, never span.
+    let vpl = 64usize / section.bits as usize;
     let mask = (1u64 << section.bits) - 1;
     for idx in 0..4096 {
-        let bit_index = idx * section.bits as usize;
-        let long_index = bit_index / 64;
-        let bit_offset = bit_index % 64;
-        if long_index >= section.longs.len() {
+        let cell = idx / vpl;
+        if cell >= section.longs.len() {
             return Err(format!(
-                "long_index {} out of range {} at idx {}",
-                long_index,
+                "cell {} out of range {} at idx {}",
+                cell,
                 section.longs.len(),
                 idx
             ));
         }
-        let mut palette_idx = (section.longs[long_index] >> bit_offset) & mask;
-        if bit_offset + section.bits as usize > 64 {
-            let bits_in_next = (bit_offset + section.bits as usize) - 64;
-            if long_index + 1 >= section.longs.len() {
-                return Err(format!("need next long at idx {}", idx));
-            }
-            let next = section.longs[long_index + 1] & ((1u64 << bits_in_next) - 1);
-            palette_idx |= next << (section.bits as usize - bits_in_next);
-        }
-        let mut palette_idx = palette_idx as usize;
+        let off = (idx - cell * vpl) * section.bits as usize;
+        let mut palette_idx = ((section.longs[cell] >> off) & mask) as usize;
         if palette_idx >= section.palette.len() {
             palette_idx %= section.palette.len();
         }
