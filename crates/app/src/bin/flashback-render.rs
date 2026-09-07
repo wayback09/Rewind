@@ -467,11 +467,8 @@ fn upload_meshes(
             // For simplicity, assume tex_keys global order matches per-mesh order (since we used same provider, first texture is same)
             // This is approximate for M8; full correct would need per-vertex texture key lookup
             let tex_key = &mesh.texture_keys[v.tex_index as usize];
-            if let Some([u0, v0, u1, v1]) = atlas_map.get(tex_key) {
-                let u = v.uv[0];
-                let vv = v.uv[1];
-                v.uv[0] = u0 + (u1 - u0) * u;
-                v.uv[1] = v0 + (v1 - v0) * vv;
+            if let Some(rect) = atlas_map.get(tex_key) {
+                v.uv = renderer::texture::TextureAtlas::remap_uv(v.uv, *rect);
             }
         }
         wgpu_state.upload_section(*key, remapped);

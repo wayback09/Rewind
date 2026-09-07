@@ -151,6 +151,7 @@ pub fn build_world_meshes(
                         normal: normals[fi],
                         uv: [0.0, 0.0],
                         tex_index: tex_idx,
+                        tint: 0,
                     });
                 }
                 indices.extend_from_slice(&[
@@ -247,6 +248,380 @@ mod tests {
         };
         let refs = crate::blockstate::resolve_blockstate(&state, &mut prov, None).unwrap();
         assert!(!refs.is_empty());
+    }
+
+    fn state(name: &str, props: &[(&str, &str)]) -> replay_model::CanonicalBlockState {
+        replay_model::CanonicalBlockState {
+            name: name.into(),
+            properties: props
+                .iter()
+                .map(|(k, v)| (k.to_string(), v.to_string()))
+                .collect(),
+        }
+    }
+
+    /// M10 regression scene: one column per block type. Verifies end-to-end
+    /// blockstate → model → distinct TextureKeys (grass top/side/dirt must be
+    /// three distinct keys; log top/side two distinct keys) and that grass
+    /// side verts sample texture-top at block-top.
+    #[test]
+    fn regression_blocks_resolve_distinct_textures() {
+        let Some(jar) = crate::asset::default_jar_path() else {
+            return;
+        };
+        let mut prov = crate::asset::JarAssetProvider::from_jar(jar).unwrap();
+        let cases = [
+            state("minecraft:grass_block", &[("snowy", "false")]),
+            state("minecraft:dirt", &[]),
+            state("minecraft:stone", &[]),
+            state("minecraft:oak_log", &[("axis", "y")]),
+            state("minecraft:snow", &[("layers", "1")]),
+            state("minecraft:sand", &[]),
+        ];
+        // Layer 1-2: model + texture resolution, all distinct where expected.
+        let mut seen: std::collections::BTreeMap<String, Vec<String>> = Default::default();
+        for st in &cases {
+            let refs = crate::blockstate::resolve_blockstate(st, &mut prov, Some((0, 0, 0)))
+                .unwrap_or_else(|e| panic!("resolve {}: {e}", st.name));
+            assert!(!refs.is_empty(), "{}", st.name);
+            for r in &refs {
+                let rm = crate::model::resolve_model(&r.key, &mut prov)
+                    .unwrap_or_else(|e| panic!("model {}: {e}", r.key));
+                assert!(!rm.elements.is_empty(), "{}", r.key);
+                for el in &rm.elements {
+                    for (fname, f) in &el.faces {
+                        let tk = f.texture.trim_start_matches('#');
+                        let resolved = rm.textures.get(tk).cloned().unwrap_or_default();
+                        assert!(
+                            !resolved.is_empty(),
+                            "{} face {fname} texture #{tk} must resolve",
+                            st.name
+                        );
+                        seen.entry(st.name.clone()).or_default().push(resolved);
+                    }
+                }
+            }
+        }
+        let grass: std::collections::BTreeSet<_> = seen["minecraft:grass_block"].iter().collect();
+        assert!(
+            grass.contains(&"minecraft:block/grass_block_top".to_string()),
+            "grass top missing: {grass:?}"
+        );
+        assert!(
+            grass.contains(&"minecraft:block/grass_block_side".to_string()),
+            "grass side missing: {grass:?}"
+        );
+        assert!(
+            grass.contains(&"minecraft:block/dirt".to_string()),
+            "grass bottom (dirt) missing: {grass:?}"
+        );
+        // Layer 5: mesh one block of each M10 regression type in an air
+        // section. Air is skipped by the mesher and nothing culls against
+        // the empty scene, so every quad inside a block's cell belongs to
+        // that block; blockstate rotations map the cube onto itself, so
+        // quads never leave the cell (overlay nudge ±0.002 tolerated by
+        // the footprint window).
+        // Strict Vt<Vb per side quad is the CORRECTNESS criterion: the 26.2
+        // models for these blocks have no side-face UV rotation and no
+        // uvlock (probed from the JAR), so texture-top must sit at block-top.
+        let matrix: &[(&str, &[(&str, &str)], &[&str])] = &[
+            // (block, props, textures that must be present)
+            (
+                "minecraft:grass_block",
+                &[("snowy", "false")],
+                &[
+                    "minecraft:block/grass_block_top",
+                    "minecraft:block/grass_block_side",
+                    "minecraft:block/grass_block_side_overlay",
+                    "minecraft:block/dirt",
+                ],
+            ),
+            (
+                "minecraft:grass_block",
+                &[("snowy", "true")],
+                &[
+                    "minecraft:block/grass_block_top",
+                    "minecraft:block/grass_block_snow",
+                    "minecraft:block/dirt",
+                ],
+            ),
+            ("minecraft:dirt", &[], &["minecraft:block/dirt"]),
+            ("minecraft:stone", &[], &["minecraft:block/stone"]),
+            ("minecraft:sand", &[], &["minecraft:block/sand"]),
+            (
+                "minecraft:oak_log",
+                &[("axis", "x")],
+                &["minecraft:block/oak_log", "minecraft:block/oak_log_top"],
+            ),
+            (
+                "minecraft:oak_log",
+                &[("axis", "y")],
+                &["minecraft:block/oak_log", "minecraft:block/oak_log_top"],
+            ),
+            (
+                "minecraft:oak_log",
+                &[("axis", "z")],
+                &["minecraft:block/oak_log", "minecraft:block/oak_log_top"],
+            ),
+            ("minecraft:oak_leaves", &[], &["minecraft:block/oak_leaves"]),
+            (
+                "minecraft:spruce_leaves",
+                &[],
+                &["minecraft:block/spruce_leaves"],
+            ),
+            (
+                "minecraft:pale_oak_leaves",
+                &[],
+                &["minecraft:block/pale_oak_leaves"],
+            ),
+            ("minecraft:snow", &[("layers", "1")], &[]),
+        ];
+        // Spread the 12 blocks at local indices i*37 (all pairwise
+        // non-face-adjacent, verified by enumeration below) so footprint
+        // attribution is unambiguous: adjacent blocks would share boundary
+        // planes, and a neighbor's face at x=k.0 would fall inside block
+        // k's [k-0.01, k+1.01] window.
+        let mut blocks = vec![state("minecraft:air", &[]); 4096];
+        let mut cells: Vec<(usize, usize, usize)> = Vec::new();
+        for (i, (name, props, _)) in matrix.iter().enumerate() {
+            let idx = i * 37;
+            blocks[idx] = state(name, props);
+            cells.push((idx % 16, idx / 256, (idx / 16) % 16));
+        }
+        for (a, b) in cells
+            .iter()
+            .enumerate()
+            .flat_map(|(n, c)| cells.iter().skip(n + 1).map(move |d| (*c, *d)))
+        {
+            let adj = (a.0 as i32 - b.0 as i32).abs()
+                + (a.1 as i32 - b.1 as i32).abs()
+                + (a.2 as i32 - b.2 as i32).abs();
+            assert!(adj > 1, "test cells {a:?} and {b:?} share a face");
+        }
+        let sec = scene::SceneSection {
+            section_y: 0,
+            y_base: 0,
+            is_empty: false,
+            blocks,
+            non_empty_block_count: 4096,
+            palette_bits: 1,
+            palette_size: 1,
+            has_renderable: true,
+        };
+        let mut textures = std::collections::HashSet::new();
+        let mesh = crate::mesh::generate_section_mesh(
+            &sec,
+            0,
+            0,
+            &empty_scene(),
+            &mut prov,
+            &mut textures,
+        )
+        .unwrap();
+        assert!(!mesh.vertices.is_empty());
+        assert_eq!(mesh.vertices.len() % 4, 0, "quads are 4 consecutive verts");
+        // Per-block checks. Quads are emitted face by face (4 consecutive
+        // verts each); attribute a quad to block i when all its verts lie in
+        // the cell footprint (nudge tolerance 0.01).
+        for (i, (name, props, want_tex)) in matrix.iter().enumerate() {
+            let (cx, cy, cz) = cells[i];
+            let in_cell = |p: &[f32; 3]| {
+                p[0] >= cx as f32 - 0.01
+                    && p[0] <= cx as f32 + 1.01
+                    && p[1] >= cy as f32 - 0.01
+                    && p[1] <= cy as f32 + 1.01
+                    && p[2] >= cz as f32 - 0.01
+                    && p[2] <= cz as f32 + 1.01
+            };
+            let mut quad_count = 0;
+            let mut side_quads = 0;
+            let mut tinted_quads = 0;
+            let mut block_tex: std::collections::BTreeSet<&str> = std::collections::BTreeSet::new();
+            for quad in mesh.vertices.chunks_exact(4) {
+                if !quad.iter().all(|v| in_cell(&v.position)) {
+                    continue;
+                }
+                quad_count += 1;
+                block_tex.insert(mesh.texture_keys[quad[0].tex_index as usize].as_str());
+                if quad.iter().all(|v| v.tint == 1) {
+                    tinted_quads += 1;
+                }
+                let n = quad[0].normal;
+                assert!(
+                    quad.iter().all(|v| v.normal == n),
+                    "{name} quad verts must share a normal"
+                );
+                if n[1].abs() > 0.5 {
+                    continue; // top/bottom faces: V runs along Z, not Y.
+                }
+                side_quads += 1;
+                // Logs tip whole faces over (bark stripes follow the log
+                // axis in-game): a side quad's UV frame may run U-along-Y
+                // after x-rotation, exactly as vanilla bakes it
+                // (face-UV rotation, then blockstate rotation,
+                // uvlock=false — no uvlock in any M10 blockstate, probed
+                // from the JAR). Require rigid transport instead: the
+                // quad's UVs must form an axis-aligned unit rectangle
+                // (2 distinct u × 2 distinct v, no shear or twist).
+                if *name == "minecraft:oak_log" {
+                    // Logs tip whole faces over (bark stripes follow the log
+                    // axis in-game): a side quad's UV frame may run U-along-Y
+                    // after x-rotation, exactly as vanilla bakes it
+                    // (face-UV rotation, then blockstate rotation,
+                    // uvlock=false — no uvlock in any M10 blockstate, probed
+                    // from the JAR). Require rigid transport instead: the
+                    // quad's UVs must form an axis-aligned unit rectangle
+                    // (2 distinct u × 2 distinct v, no shear or twist).
+                    let mut us: Vec<f32> = quad.iter().map(|v| v.uv[0]).collect();
+                    let mut vs: Vec<f32> = quad.iter().map(|v| v.uv[1]).collect();
+                    us.sort_by(|a, b| a.partial_cmp(b).unwrap());
+                    vs.sort_by(|a, b| a.partial_cmp(b).unwrap());
+                    us.dedup_by(|a, b| (*a - *b).abs() < 1e-6);
+                    vs.dedup_by(|a, b| (*a - *b).abs() < 1e-6);
+                    assert_eq!(us.len(), 2, "{name} log quad u must take 2 values");
+                    assert_eq!(vs.len(), 2, "{name} log quad v must take 2 values");
+                    for x in us {
+                        assert!(
+                            x.abs() < 1e-6 || (x - 1.0).abs() < 1e-6,
+                            "{name} log quad u must span full width"
+                        );
+                    }
+                    for y in vs {
+                        assert!(
+                            y.abs() < 1e-6 || (y - 1.0).abs() < 1e-6,
+                            "{name} log quad v must span full height"
+                        );
+                    }
+                } else {
+                    let top_y = quad
+                        .iter()
+                        .map(|v| v.position[1])
+                        .fold(f32::NEG_INFINITY, f32::max);
+                    let bot_y = quad
+                        .iter()
+                        .map(|v| v.position[1])
+                        .fold(f32::INFINITY, f32::min);
+                    assert!(
+                        top_y > bot_y + 1e-6,
+                        "{name} side quad must span Y ({top_y} vs {bot_y})"
+                    );
+                    let top_v: Vec<f32> = quad
+                        .iter()
+                        .filter(|v| (v.position[1] - top_y).abs() < 1e-6)
+                        .map(|v| v.uv[1])
+                        .collect();
+                    let bot_v: Vec<f32> = quad
+                        .iter()
+                        .filter(|v| (v.position[1] - bot_y).abs() < 1e-6)
+                        .map(|v| v.uv[1])
+                        .collect();
+                    assert_eq!(top_v.len(), 2, "{name} side quad needs 2 top verts");
+                    assert_eq!(bot_v.len(), 2, "{name} side quad needs 2 bottom verts");
+                    assert!(
+                        (top_v[0] - top_v[1]).abs() < 1e-6,
+                        "{name} top edge must share one v"
+                    );
+                    assert!(
+                        (bot_v[0] - bot_v[1]).abs() < 1e-6,
+                        "{name} bottom edge must share one v"
+                    );
+                    assert!(
+                        top_v[0] < bot_v[0] - 1e-6,
+                        "{name} texture-top must sit at block-top (Vt={} >= Vb={})",
+                        top_v[0],
+                        bot_v[0]
+                    );
+                }
+            }
+            assert!(quad_count >= 6, "{name} full cube needs >= 6 quads");
+            assert!(side_quads >= 4, "{name} needs >= 4 side quads");
+            for t in *want_tex {
+                assert!(
+                    block_tex.contains(t),
+                    "{name} missing texture {t} (got {block_tex:?})"
+                );
+            }
+            if *name == "minecraft:oak_log" {
+                // Rings texture must sit on the faces perpendicular to the
+                // log axis (rotation path validation, not just texture set):
+                // axis=y -> ±Y, axis=x -> ±X, axis=z -> ±Z.
+                let axis = props
+                    .iter()
+                    .find(|(k, _)| *k == "axis")
+                    .map(|(_, v)| *v)
+                    .unwrap_or("y");
+                let ring_normals: [[f32; 3]; 2] = match axis {
+                    "x" => [[1.0, 0.0, 0.0], [-1.0, 0.0, 0.0]],
+                    "z" => [[0.0, 0.0, 1.0], [0.0, 0.0, -1.0]],
+                    _ => [[0.0, 1.0, 0.0], [0.0, -1.0, 0.0]],
+                };
+                let mut ring_quads = 0;
+                let mut bark_quads = 0;
+                for quad in mesh.vertices.chunks_exact(4) {
+                    if !quad.iter().all(|v| in_cell(&v.position)) {
+                        continue;
+                    }
+                    let key = mesh.texture_keys[quad[0].tex_index as usize].as_str();
+                    if key == "minecraft:block/oak_log_top" {
+                        ring_quads += 1;
+                        assert!(
+                            ring_normals.contains(&quad[0].normal),
+                            "axis={axis} rings quad has wrong normal {:?}",
+                            quad[0].normal
+                        );
+                    } else if key == "minecraft:block/oak_log" {
+                        bark_quads += 1;
+                    }
+                }
+                assert_eq!(ring_quads, 2, "axis={axis} needs 2 ring faces");
+                assert_eq!(bark_quads, 4, "axis={axis} needs 4 bark faces");
+            }
+            match *name {
+                "minecraft:grass_block" if quad_count == 10 => {
+                    // Base element (6) + side overlay element (4). Top face
+                    // and all 4 overlay sides are tinted: 5 tinted quads.
+                    assert_eq!(tinted_quads, 5, "grass tinted quad count");
+                }
+                n if n.ends_with("_leaves") => {
+                    // leaves.json tints all six faces.
+                    assert_eq!(tinted_quads, quad_count, "{n} all quads tinted");
+                }
+                "minecraft:dirt" | "minecraft:stone" | "minecraft:sand" => {
+                    assert_eq!(tinted_quads, 0, "{name} must not be tinted");
+                    assert_eq!(block_tex.len(), 1, "{name} single texture");
+                }
+                _ => {}
+            }
+        }
+    }
+
+    fn empty_scene() -> scene::Scene {
+        scene::Scene {
+            tick: 0,
+            environment: scene::SceneEnvironment {
+                dimension: "minecraft:overworld".into(),
+                dimension_source: "test".into(),
+                sky_available: true,
+                lighting_status: scene::LightingStatus::RawPreserved,
+                biome_status: scene::BiomeStatus::RawPreserved,
+                world_time: None,
+                world_border: None,
+                spawn: None,
+            },
+            chunks: Default::default(),
+            entities: vec![],
+            local_player: None,
+            block_entity_count: 0,
+            total_sections: 0,
+            total_blocks: 0,
+            renderable_blocks: 0,
+            minecraft_version: "26.2".into(),
+            data_version: 4903,
+            protocol_version: 776,
+            warnings: vec![],
+            asset_dependency_count: 0,
+            asset_keys: vec![],
+        }
     }
 
     #[test]
@@ -459,11 +834,8 @@ pub fn run_blocking(scene: scene::Scene) {
         let mut remapped = mesh.clone();
         for v in &mut remapped.vertices {
             let tex_key = &mesh.texture_keys[v.tex_index as usize];
-            if let Some([u0, v0, u1, v1]) = atlas_map.get(tex_key) {
-                let u = v.uv[0];
-                let vv = v.uv[1];
-                v.uv[0] = u0 + (u1 - u0) * u;
-                v.uv[1] = v0 + (v1 - v0) * vv;
+            if let Some(rect) = atlas_map.get(tex_key) {
+                v.uv = crate::texture::TextureAtlas::remap_uv(v.uv, *rect);
             }
         }
         wgpu_state.upload_section(*key, remapped);

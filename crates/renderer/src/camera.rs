@@ -70,16 +70,21 @@ impl Camera {
     }
 }
 
+/// TEMPORARY FALLBACK (M10): plains foliage tint until biome tint data is decoded.
+pub const FALLBACK_FOLIAGE_TINT: [f32; 4] = [0.5686, 0.7373, 0.3490, 1.0]; // #91BD59
+
 #[repr(C)]
 #[derive(Copy, Clone, Debug, bytemuck::Pod, bytemuck::Zeroable)]
 pub struct CameraUniform {
     pub view_proj: [[f32; 4]; 4],
+    pub tint_color: [f32; 4],
 }
 
 impl CameraUniform {
     pub fn new() -> Self {
         Self {
             view_proj: Mat4::IDENTITY.to_cols_array_2d(),
+            tint_color: FALLBACK_FOLIAGE_TINT,
         }
     }
     pub fn update(&mut self, camera: &Camera) {

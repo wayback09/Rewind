@@ -156,13 +156,42 @@ impl TextureAtlas {
         })
     }
 
+    /// M10: tile-local UV (0-1) → atlas UV. Pure math, no GPU needed.
+    pub fn remap_uv(uv: [f32; 2], rect: [f32; 4]) -> [f32; 2] {
+        let [u0, v0, u1, v1] = rect;
+        [u0 + (u1 - u0) * uv[0], v0 + (v1 - v0) * uv[1]]
+    }
+
     pub fn uv_for(&self, key: &str, uv: [f32; 2]) -> [f32; 2] {
-        if let Some([u0, v0, u1, v1]) = self.map.get(key) {
-            let u = u0 + (u1 - u0) * uv[0];
-            let v = v0 + (v1 - v0) * uv[1];
-            [u, v]
+        if let Some(rect) = self.map.get(key) {
+            Self::remap_uv(uv, *rect)
         } else {
             uv
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::TextureAtlas;
+
+    /// M10: atlas remap is a linear map of tile-local UV into the tile rect.
+    #[test]
+    fn remap_uv_maps_corners() {
+        let rect = [0.25, 0.5, 0.375, 0.75];
+        assert_eq!(TextureAtlas::remap_uv([0.0, 0.0], rect), [0.25, 0.5]);
+        assert_eq!(TextureAtlas::remap_uv([1.0, 1.0], rect), [0.375, 0.75]);
+        assert_eq!(TextureAtlas::remap_uv([0.5, 0.5], rect), [0.3125, 0.625]);
+    }
+
+    /// M10: remap must preserve orientation (no hidden V flip); tile-top stays rect-top.
+    #[test]
+    fn remap_uv_preserves_v_orientation() {
+        let rect = [0.0, 0.0, 0.0625, 0.25];
+        let top = TextureAtlas::remap_uv([0.3, 0.0], rect);
+        let bottom = TextureAtlas::remap_uv([0.3, 1.0], rect);
+        assert!(top[1] < bottom[1]);
+        assert_eq!(top[1], 0.0);
+        assert_eq!(bottom[1], 0.25);
     }
 }

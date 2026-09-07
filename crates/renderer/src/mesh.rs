@@ -13,6 +13,9 @@ pub struct Vertex {
     pub normal: [f32; 3],
     pub uv: [f32; 2],
     pub tex_index: u32,
+    /// M10: 1 when the source model face has a tintindex (foliage/grass overlay),
+    /// 0 otherwise. Consumed by the shader's fallback tint color.
+    pub tint: u32,
 }
 
 #[cfg(feature = "window")]
@@ -40,6 +43,11 @@ impl Vertex {
                 wgpu::VertexAttribute {
                     offset: 32,
                     shader_location: 3,
+                    format: wgpu::VertexFormat::Uint32,
+                },
+                wgpu::VertexAttribute {
+                    offset: 36,
+                    shader_location: 4,
                     format: wgpu::VertexFormat::Uint32,
                 },
             ],
@@ -135,9 +143,14 @@ fn generate_from_blocks(
                         continue;
                     }
                     if let Some(cull) = &face.cullface {
+                        // M10: cull against the ROTATED facing direction; the
+                        // unrotated cullface names the wrong neighbor for
+                        // models with x/y rotation (logs, weighted variants).
+                        let rotated = rotated_cullface(cull, &mref);
+                        let cull_dir = rotated.unwrap_or(cull.as_str());
                         if should_cull(
                             face_name,
-                            cull,
+                            cull_dir,
                             wx,
                             wy,
                             wz,
@@ -175,6 +188,65 @@ fn generate_from_blocks(
         indices,
         texture_keys,
     })
+}
+
+/// M10: rotate an axis-aligned direction vector through a blockstate model
+/// rotation, X first then Y — the same order and convention as the corner
+/// positions in `push_face_quad` (R_x(+90): +Y→+Z, R_y(+90): +Z→+X, validated
+/// against the oak_log axis=x/z blockstate which must move ring textures
+/// from ±Y to ±Z/±X). Exact integer math: rotations are multiples of 90°.
+///
+/// Without this, faces of rotated models (grass/dirt/stone/sand y-variants,
+/// logs on axis x/z) keep their unrotated normal and cullface: shading uses
+/// the wrong face direction and `should_cull` tests the wrong neighbor,
+/// deleting visible faces (holes) or keeping hidden ones.
+fn rotate_dir_vec(dir: [i32; 3], mref: &crate::blockstate::BlockModelRef) -> [i32; 3] {
+    let steps = |deg: i32| ((deg % 360 + 360) % 360 / 90) as u32;
+    let [mut x, mut y, mut z] = dir;
+    for _ in 0..steps(mref.x) {
+        // R_x(+90): (x, y, z) -> (x, -z, y)
+        (y, z) = (-z, y);
+    }
+    for _ in 0..steps(mref.y) {
+        // R_y(+90): (x, y, z) -> (z, y, -x)
+        (x, z) = (z, -x);
+    }
+    [x, y, z]
+}
+
+fn dir_name_to_vec(name: &str) -> Option<[i32; 3]> {
+    match name {
+        "down" => Some([0, -1, 0]),
+        "up" => Some([0, 1, 0]),
+        "north" => Some([0, 0, -1]),
+        "south" => Some([0, 0, 1]),
+        "west" => Some([-1, 0, 0]),
+        "east" => Some([1, 0, 0]),
+        _ => None,
+    }
+}
+
+fn dir_vec_to_name(v: [i32; 3]) -> Option<&'static str> {
+    match v {
+        [0, -1, 0] => Some("down"),
+        [0, 1, 0] => Some("up"),
+        [0, 0, -1] => Some("north"),
+        [0, 0, 1] => Some("south"),
+        [-1, 0, 0] => Some("west"),
+        [1, 0, 0] => Some("east"),
+        _ => None,
+    }
+}
+
+/// M10: cullface direction after the blockstate rotation. Returns `None`
+/// when the rotated direction is not axis-aligned (never for 90° multiples)
+/// — callers must fall back to the unrotated cullface then.
+fn rotated_cullface(
+    cullface: &str,
+    mref: &crate::blockstate::BlockModelRef,
+) -> Option<&'static str> {
+    let v = dir_name_to_vec(cullface)?;
+    dir_vec_to_name(rotate_dir_vec(v, mref))
 }
 
 fn is_transparent_block(name: &str) -> bool {
@@ -332,15 +404,19 @@ fn push_face_quad(
             _ => {}
         }
     }
-    let normal = match face_name {
-        "down" => [0.0, -1.0, 0.0],
-        "up" => [0.0, 1.0, 0.0],
-        "north" => [0.0, 0.0, -1.0],
-        "south" => [0.0, 0.0, 1.0],
-        "west" => [-1.0, 0.0, 0.0],
-        "east" => [1.0, 0.0, 0.0],
-        _ => [0.0, 1.0, 0.0],
+    // M10: the normal follows the blockstate rotation like the corners do;
+    // otherwise shading (and the overlay nudge below) uses a stale direction.
+    let base_normal = match face_name {
+        "down" => [0, -1, 0],
+        "up" => [0, 1, 0],
+        "north" => [0, 0, -1],
+        "south" => [0, 0, 1],
+        "west" => [-1, 0, 0],
+        "east" => [1, 0, 0],
+        _ => [0, 1, 0],
     };
+    let rn = rotate_dir_vec(base_normal, mref);
+    let normal = [rn[0] as f32, rn[1] as f32, rn[2] as f32];
     let corners: [[f32; 3]; 4] = match face_name {
         "down" => [
             [from[0], from[1], from[2]],
@@ -408,22 +484,35 @@ fn push_face_quad(
         }
         rotated[i] = [pos.x, pos.y, pos.z];
     }
+    // M10: UV slot order must match vanilla FaceBakery. Our corners are vanilla's
+    // [v1, v2, v3, v0] cyclic rotation, and vanilla assigns
+    // v0:(minU,minV) v1:(minU,maxV) v2:(maxU,maxV) v3:(maxU,minV), so our slots
+    // get [(minU,maxV),(maxU,maxV),(maxU,minV),(minU,minV)]. The previous code
+    // used [(minU,minV),(maxU,minV),(maxU,maxV),(minU,maxV)], i.e. V inverted:
+    // texture-top rendered at block-bottom (grass green strip at base, etc.).
     let uvs = [
-        [uv0[0], uv0[1]],
-        [uv1[0], uv0[1]],
-        [uv1[0], uv1[1]],
         [uv0[0], uv1[1]],
+        [uv1[0], uv1[1]],
+        [uv1[0], uv0[1]],
+        [uv0[0], uv0[1]],
     ];
+    // M10: tinted overlay faces (grass/leaf overlays) share the base face plane.
+    // Nudge them slightly along the normal so they pass the Less depth test
+    // against the base quad (TEMPORARY FALLBACK until translucent sorting).
+    let tinted = face.tintindex.is_some();
+    let nudge = if tinted { 0.002 } else { 0.0 };
+    let tint = if tinted { 1 } else { 0 };
     for i in 0..4 {
         vertices.push(Vertex {
             position: [
-                wx + rotated[i][0] / 16.0,
-                wy + rotated[i][1] / 16.0,
-                wz + rotated[i][2] / 16.0,
+                wx + rotated[i][0] / 16.0 + normal[0] * nudge,
+                wy + rotated[i][1] / 16.0 + normal[1] * nudge,
+                wz + rotated[i][2] / 16.0 + normal[2] * nudge,
             ],
             normal,
             uv: uvs[i],
             tex_index: tex_idx,
+            tint,
         });
     }
     indices.extend_from_slice(&[base, base + 1, base + 2, base, base + 2, base + 3]);
@@ -439,6 +528,7 @@ pub(crate) fn coordinates_local(idx: usize) -> (usize, usize, usize) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::collections::BTreeMap;
     #[cfg(feature = "window")]
     #[test]
     fn vertex_desc_ok() {
@@ -451,5 +541,176 @@ mod tests {
             let nidx = (ly * 16 + lz) * 16 + lx;
             assert_eq!(idx, nidx);
         }
+    }
+
+    fn test_face(name: &str, tinted: bool) -> crate::model::ModelFace {
+        crate::model::ModelFace {
+            texture: "#all".into(),
+            uv: Some([0.0, 0.0, 16.0, 16.0]),
+            rotation: None,
+            cullface: Some(name.into()),
+            tintindex: if tinted { Some(0) } else { None },
+        }
+    }
+
+    fn test_elem() -> crate::model::ModelElement {
+        crate::model::ModelElement {
+            from: [0.0, 0.0, 0.0],
+            to: [16.0, 16.0, 16.0],
+            rotation: None,
+            shade: None,
+            faces: BTreeMap::new(),
+        }
+    }
+
+    fn test_mref() -> crate::blockstate::BlockModelRef {
+        crate::blockstate::BlockModelRef {
+            key: "minecraft:block/stone".into(),
+            x: 0,
+            y: 0,
+            uvlock: false,
+            weight: 1,
+        }
+    }
+
+    fn quad_for(face_name: &str, tinted: bool) -> Vec<Vertex> {
+        quad_for_rot(face_name, tinted, 0, 0)
+    }
+
+    fn quad_for_rot(face_name: &str, tinted: bool, rx: i32, ry: i32) -> Vec<Vertex> {
+        let mut vertices = Vec::new();
+        let mut indices = Vec::new();
+        let elem = test_elem();
+        let face = test_face(face_name, tinted);
+        let mut mref = test_mref();
+        mref.x = rx;
+        mref.y = ry;
+        push_face_quad(
+            &mut vertices,
+            &mut indices,
+            &elem,
+            &face,
+            face_name,
+            &mref,
+            0.0,
+            0.0,
+            0.0,
+            0,
+        );
+        assert_eq!(vertices.len(), 4);
+        vertices
+    }
+
+    /// M10: vanilla FaceInfo assigns v0:(minU,minV) to the TOP corner of side
+    /// faces (e.g. NORTH v0/v3 have MAX_Y). Texture-top (v=0) must land on
+    /// block-top (y=1.0 in world units for a full cube at origin).
+    #[test]
+    fn side_face_texture_top_at_block_top() {
+        for face in ["north", "south", "west", "east"] {
+            let verts = quad_for(face, false);
+            for v in &verts {
+                let is_top = (v.position[1] - 1.0).abs() < 1e-6;
+                let is_bottom = v.position[1].abs() < 1e-6;
+                assert!(is_top || is_bottom, "{face} y={}", v.position[1]);
+                if is_top {
+                    assert!(
+                        v.uv[1].abs() < 1e-6,
+                        "{face} top vertex must sample texture top, got v={}",
+                        v.uv[1]
+                    );
+                } else {
+                    assert!(
+                        (v.uv[1] - 1.0).abs() < 1e-6,
+                        "{face} bottom vertex must sample texture bottom, got v={}",
+                        v.uv[1]
+                    );
+                }
+                assert_eq!(v.tint, 0);
+            }
+        }
+    }
+
+    /// M10: faces with tintindex (grass/leaf overlays) must carry the tint flag
+    /// so the shader can apply the fallback foliage color; untinted faces stay 0.
+    #[test]
+    fn tint_flag_follows_tintindex() {
+        let verts = quad_for("north", true);
+        assert!(verts.iter().all(|v| v.tint == 1));
+        let verts = quad_for("up", false);
+        assert!(verts.iter().all(|v| v.tint == 0));
+    }
+
+    /// M10: Y rotation preserves the vertical slot assignment (rotation about
+    /// the vertical axis cannot move texture-top to block-bottom), so the
+    /// V orientation invariant holds for every weighted-rotation variant.
+    #[test]
+    fn rotation_y_preserves_side_v_orientation() {
+        for face in ["north", "south", "west", "east"] {
+            for ry in [0, 90, 180, 270] {
+                let verts = quad_for_rot(face, false, 0, ry);
+                for v in &verts {
+                    let is_top = (v.position[1] - 1.0).abs() < 1e-6;
+                    let is_bottom = v.position[1].abs() < 1e-6;
+                    assert!(is_top || is_bottom, "{face} y={ry} y={}", v.position[1]);
+                    if is_top {
+                        assert!(
+                            v.uv[1].abs() < 1e-6,
+                            "{face} y={ry} top must sample texture top, got v={}",
+                            v.uv[1]
+                        );
+                    } else {
+                        assert!(
+                            (v.uv[1] - 1.0).abs() < 1e-6,
+                            "{face} y={ry} bottom must sample texture bottom, got v={}",
+                            v.uv[1]
+                        );
+                    }
+                }
+            }
+        }
+    }
+
+    /// M10: x=90 moves the up face (log ring texture) onto the south side,
+    /// carrying its normal with it. Regression geometry for axis=z logs.
+    #[test]
+    fn rotation_x90_moves_up_face_south() {
+        let verts = quad_for_rot("up", false, 90, 0);
+        assert!(verts.iter().all(|v| (v.position[2] - 1.0).abs() < 1e-4));
+        assert!(verts.iter().all(|v| v.normal == [0.0, 0.0, 1.0]));
+    }
+
+    /// M10: direction rotation must match the corner rotation (same order:
+    /// X first, then Y). The oak_log axis=x case (x=90 then y=90) must move
+    /// ring textures from ±Y to ±X — the constraint that fixes the convention.
+    #[test]
+    fn rotated_cullface_matches_geometry() {
+        let mref = |x, y| crate::blockstate::BlockModelRef {
+            key: "minecraft:block/oak_log".into(),
+            x,
+            y,
+            uvlock: false,
+            weight: 1,
+        };
+        // Identity.
+        for d in ["down", "up", "north", "south", "west", "east"] {
+            assert_eq!(rotated_cullface(d, &mref(0, 0)), Some(d));
+        }
+        // Y rotations cycle the compass.
+        assert_eq!(rotated_cullface("north", &mref(0, 90)), Some("west"));
+        assert_eq!(rotated_cullface("west", &mref(0, 90)), Some("south"));
+        assert_eq!(rotated_cullface("south", &mref(0, 90)), Some("east"));
+        assert_eq!(rotated_cullface("east", &mref(0, 90)), Some("north"));
+        assert_eq!(rotated_cullface("up", &mref(0, 90)), Some("up"));
+        assert_eq!(rotated_cullface("north", &mref(0, 180)), Some("south"));
+        // X rotation tips top/bottom onto the sides.
+        assert_eq!(rotated_cullface("up", &mref(90, 0)), Some("south"));
+        assert_eq!(rotated_cullface("down", &mref(90, 0)), Some("north"));
+        assert_eq!(rotated_cullface("north", &mref(90, 0)), Some("up"));
+        assert_eq!(rotated_cullface("south", &mref(90, 0)), Some("down"));
+        // axis=x log composition: rings ±Y -> ±Z -> ±X.
+        assert_eq!(rotated_cullface("up", &mref(90, 90)), Some("east"));
+        assert_eq!(rotated_cullface("down", &mref(90, 90)), Some("west"));
+        assert_eq!(rotate_dir_vec([0, 1, 0], &mref(90, 90)), [1, 0, 0]);
+        assert_eq!(rotate_dir_vec([0, -1, 0], &mref(90, 90)), [-1, 0, 0]);
     }
 }
