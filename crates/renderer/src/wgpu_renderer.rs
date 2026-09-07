@@ -91,7 +91,10 @@ impl WgpuState {
             label: Some("camera layout"),
             entries: &[wgpu::BindGroupLayoutEntry {
                 binding: 0,
-                visibility: wgpu::ShaderStages::VERTEX,
+                // M10: the fragment stage reads camera.tint_color (foliage
+                // fallback tint); vertex-only visibility fails pipeline
+                // validation ("ResourceBinding is not available").
+                visibility: wgpu::ShaderStages::VERTEX_FRAGMENT,
                 ty: wgpu::BindingType::Buffer {
                     ty: wgpu::BufferBindingType::Uniform,
                     has_dynamic_offset: false,

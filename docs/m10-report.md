@@ -164,7 +164,13 @@ vanilla-faithful behavior, not a bug — the matrix test asserts rigid
   live winit viewer — no display here, so no pixel before/after at tick
   2341. Substituted with mesh-level proof (unit + 12-block matrix over
   the recording's block types). Pixel comparison on a display machine
-  and WGSL runtime validation at first viewer launch are FOLLOW-UPs.
+  remains a FOLLOW-UP. WGSL runtime validation happened at first viewer
+  launch (post-M10): the viewer panicked in `create_render_pipeline` —
+  `fs_main` reads `camera.tint_color` but the camera bind layout granted
+  VERTEX-only visibility. Fixed in `wgpu_renderer.rs` (follow-up commit):
+  `VERTEX_FRAGMENT`. Lesson: every uniform consumed by the fragment stage
+  must be in the bind-group visibility flags; `cargo check` cannot catch
+  this, only device-side pipeline creation can.
 
 ## 6. Recording evidence
 
@@ -205,9 +211,10 @@ our TEMPORARY FALLBACK for missing translucent sorting).
   overlay depth nudge (needs translucent sorting); `uvlock:true` ignored
   (no M10 user; revisit with rails/doors/walls).
 - UNSUPPORTED: none added.
-- FUTURE WORK: stair shapes (pre-existing); WGSL runtime check at viewer
-  launch; pixel before/after on a display machine; vanilla rotation-direction
-  parity for asymmetric models; playback seek-test OOM.
+- FUTURE WORK: stair shapes (pre-existing); pixel before/after on a
+  display machine; vanilla rotation-direction parity for asymmetric
+  models; playback seek-test OOM. (WGSL runtime check: DONE post-M10 —
+  caught and fixed the camera visibility flags, §5.)
 
 ## 11. Unknowns and questions for other agents
 
