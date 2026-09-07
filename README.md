@@ -6,8 +6,10 @@ Rewind reads Flashback recordings directly, validates their binary structure, de
 
 The long-term goal is a standalone replay viewer/editor capable of reconstructing and editing Flashback recordings without requiring the Minecraft client.
 
-> **Status:** M0, M1, M2, M3, M4, M5, and **M6 (scene representation)** complete — renderer-independent Scene validated, seek→scene == sequential→scene.  
-> Rendering (M7) and the desktop UI come later.
+> **Status:** M0–M6 complete, plus **M7 (wgpu renderer)**, **M8 (live viewer)**,
+> **M9 (ground-truth audit)**, **M9.9 (palette fix)** and **M10 (texture/UV fix)** —
+> `flashback-render` opens real recordings in a live 3D window without Minecraft running.
+> Research details live in `docs/m*-report.md`. Desktop editing UI comes later.
 
 ## Features
 
@@ -125,23 +127,24 @@ This allows the eventual renderer and editor to operate on canonical data rather
 
 ## Current limitations
 
-Rewind is still early-stage.
-
-M4 (tick-by-tick playback) and M5 (snapshot-based seeking, forward/backward, checkpoints) are validated.
+M7 (GPU renderer), M8 (live viewer) and M10 (texture/UV correctness) are done:
+`flashback-render` meshes Scene chunks with real 26.2 block models and atlas
+textures, with a fallback plains foliage tint and a directional-sun fallback.
 
 The following are intentionally not complete yet:
 
-- 3D rendering
-- Minecraft model loading
-- Texture loading
-- Lighting reconstruction
-- Full biome canonicalization
+- Lighting reconstruction (directional fallback only)
+- Biome decoding (raw preserved; flat fallback tint, no per-biome colors yet)
+- Transparency / translucent sorting (alpha-cutout discard only; grass overlay
+  uses a small depth nudge as a TEMPORARY FALLBACK)
+- Entity models (debug boxes, not real models)
+- Non-cube block shapes (stairs etc. render as full cubes — TEMPORARY FALLBACK)
+- `uvlock:true` model rotations (unused by all validated blocks so far)
 - Complete block-entity semantics
-- Entity reconstruction
 - Editing
 - Camera/keyframe tools
 - Timeline UI
-- Desktop GUI
+- Desktop GUI polish
 
 Some Minecraft data is currently preserved in raw form when its exact representation has not yet been fully validated.
 
@@ -268,6 +271,18 @@ target/verify-m2.json
 target/verify-m3.json
 ```
 
+### M7/M8/M10 — Live replay viewer
+
+Needs the `render` feature (pulls in wgpu/winit) and a display:
+
+```powershell
+cargo run -p app --features render --bin flashback-render -- recordings/chunks/test_recording3.zip 2341
+```
+
+Opens a live 3D window at the given tick (default 0). Meshing uses the 26.2
+client JAR block models/textures; texture/UV correctness is covered by the
+renderer test suite (`cargo test -p renderer`) — see `docs/m10-report.md`.
+
 ## Registry generation
 
 The repository contains:
@@ -315,6 +330,9 @@ Rewind/
 │   ├── scene/
 │   │   └── # M6 renderer-independent Scene (coordinates, builder, fingerprint, diff, asset)
 │   │
+│   ├── renderer/
+│   │   └── # M7/M10 Scene → mesh + wgpu rendering (26.2 models, atlas, tint)
+│   │
 │   └── app/
 │       └── src/bin/
 │           ├── flashback-probe.rs
@@ -323,7 +341,8 @@ Rewind/
 │           ├── flashback-replay-state-probe.rs
 │           ├── flashback-playback-probe.rs
 │           ├── flashback-seek-probe.rs
-│           └── flashback-scene-probe.rs
+│           ├── flashback-scene-probe.rs
+│           └── flashback-render.rs  # M8 live viewer (needs --features render)
 │
 └── recordings/
     └── # Local test recordings
@@ -460,15 +479,15 @@ version-independent renderer/editor
   - Camera representation
   - Lighting representation
   - Asset abstraction
-- **M7 — Rendering**
+- **M7 — Rendering** (renderer complete; lighting/transparency still fallback)
   - GPU renderer
   - Minecraft block models
   - Textures
-  - Entities
-  - Lighting
-  - Transparency
+  - Entities (debug boxes)
+  - Lighting (directional fallback)
+  - Transparency (cutout only, sorting open)
   - Chunk meshing
-- **M8 — Desktop editor**
+- **M8 — Desktop editor** (live viewer complete; editor tools open)
   - Timeline
   - Camera/keyframes
   - Playback controls
@@ -476,6 +495,14 @@ version-independent renderer/editor
   - Recording inspector
   - Editing tools
   - Export
+- **M9 — Ground-truth audit**
+  - Render-vs-recording fidelity checks
+- **M9.9 — Palette fix**
+  - Padded big-endian `SimpleBitStorage` matching Minecraft 26.2
+- **M10 — Texture/UV forensics** (complete, see `docs/m10-report.md`)
+  - FaceBakery V-orientation fix
+  - Rotation-aware normals and culling
+  - `tintindex` plumbing + plains fallback tint
 
 ## Philosophy
 
