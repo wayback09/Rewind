@@ -209,13 +209,29 @@ new attribute needed no layout change beyond `Vertex::desc` (struct-sized).
   headless M12 probe count** (cross-process determinism CONFIRMED).
 - Visual: sunlit surfaces bright, grass/leaf tint correct, dark
   cave/shade regions present. Torches/lava not yet visually confirmed.
-- OPEN: large flat-black patches scattered through the canopy. Unclear
-  whether correctly-dark (cave mouths, deep canopy shade — vanilla is
-  dark there too) or a sampling error (faces reading 0 where vanilla
-  propagates light, e.g. shaded-leaf interiors via tint×0). Requested:
-  close-up screenshot of a black patch + a nether run at tick 2341
-  (lava-glow check). Do NOT tune the shader until classified — evidence
-  before synthesis.
+- Operator screenshots (6) classify the black patches — verdict: CONSISTENT
+  WITH CORRECT, no sampling error found:
+  - Under-trees (overworld): torches glow with smooth falloff into
+    darkness; dappled canopy light on the floor; tinted leaves. Block-light
+    path visually CONFIRMED incl. gradients.
+  - Caves (overworld): grayscale gradients across stone/dirt, coal ore
+    visible, brighter toward the entrance side. Correct cave look.
+  - Nether roof: ~95% black bedrock roof far from light. Vanilla is also
+    near-black there (nether ambient is minimal); no contrary evidence.
+  - Nether cave ×3: lava pools/falls glow orange with distance falloff
+    into dark netherrack; basalt pillars gradient-lit. Block-light path
+    visually CONFIRMED in the nether; zero-sky confirmed (no blue tint,
+    no sky-bright surfaces).
+  - Scattered pitch-black quads amid lit rock read as unlit pockets/cavities
+    (faces looking into (0,0) cells) — consistent with the arrays, which are
+    vanilla's own flood fill. Would only be wrong if vanilla propagates
+    light there; no evidence of that.
+  - Title bars match headless evidence exactly (49/439 overworld,
+    201/1369 nether) — scene identity re-confirmed.
+- Deliberately NOT tuned: dark floor stays 0.015, ramp unchanged. Vanilla
+  light-0 is nearly black; brightening it would be aesthetic fabrication.
+  Remaining visual gap (FUTURE WORK): night darkening, exact LightTexture
+  ramps, nether ambient floor calibration.
 
 ## 15. Questions for other agents
 
