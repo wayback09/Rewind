@@ -201,7 +201,23 @@ new attribute needed no layout change beyond `Vertex::desc` (struct-sized).
 - UNKNOWN: End-dimension sky data (none in recordings); Starlight-format
   chunks (none observed — strict parse would reject, fallback applies).
 
-## 14. Questions for other agents
+## 14. Viewer-launch validation (operator screenshot, tick 0 overworld)
+
+- Pipeline creation succeeds on-device (M10 `VERTEX_FRAGMENT` fix + new
+  WGSL light path both validated). No panic.
+- Title bar: 49 chunks, 439 meshes, **1600816 verts — exact match with the
+  headless M12 probe count** (cross-process determinism CONFIRMED).
+- Visual: sunlit surfaces bright, grass/leaf tint correct, dark
+  cave/shade regions present. Torches/lava not yet visually confirmed.
+- OPEN: large flat-black patches scattered through the canopy. Unclear
+  whether correctly-dark (cave mouths, deep canopy shade — vanilla is
+  dark there too) or a sampling error (faces reading 0 where vanilla
+  propagates light, e.g. shaded-leaf interiors via tint×0). Requested:
+  close-up screenshot of a black patch + a nether run at tick 2341
+  (lava-glow check). Do NOT tune the shader until classified — evidence
+  before synthesis.
+
+## 15. Questions for other agents
 
 1. Playback seek-test OOM (>10 GB) is still open and independent — needs an owner.
 2. Operator with a display: launch the viewer on tick 0 (caves vs surface)
