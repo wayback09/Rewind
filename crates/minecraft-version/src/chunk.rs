@@ -247,7 +247,12 @@ pub fn decode_canonical_chunk(
     } else {
         None
     };
-    let lighting = LightingData {
+    // M12: strictly decode per-section nibble arrays when the blob is a
+    // well-formed vanilla lightData tail. On any inconsistency (e.g., chunks
+    // whose block-entity loop broke early, leaving NBT bytes ahead of the
+    // light data) keep raw preservation + per-section None (documented
+    // fallback in the renderer); never fabricate arrays.
+    let mut lighting = LightingData {
         status: if light_raw.is_some() {
             "preserved_raw".to_string()
         } else {
@@ -282,7 +287,6 @@ pub fn decode_canonical_chunk(
         }
         let non_empty = pal.non_empty_block_count;
         total_non_empty += non_empty as usize;
-        // For now, biomes are raw, light per section is not decoded
         canonical_sections.push(CanonicalSection {
             section_y,
             y_base,
@@ -294,6 +298,31 @@ pub fn decode_canonical_chunk(
             palette_bits: pal.bits,
             palette_size: pal.palette.len(),
         });
+    }
+    // M12: fill per-section nibble arrays from the decoded light tail.
+    if let Some(raw) = lighting.raw_bytes.as_ref() {
+        if let Some(decoded) = crate::light::decode_light_data(raw, min_y) {
+            for sec in &mut canonical_sections {
+                if let Some(from) = decoded
+                    .sections
+                    .iter()
+                    .find(|s| s.section_y == sec.section_y)
+                {
+                    sec.sky_light = from.sky.map(|a| a.to_vec());
+                    sec.block_light = from.block.map(|a| a.to_vec());
+                }
+            }
+            lighting.status = "decoded".to_string();
+            lighting.per_section = decoded
+                .sections
+                .iter()
+                .map(|s| SectionLight {
+                    section_y: s.section_y,
+                    sky_light: s.sky.map(|a| a.to_vec()),
+                    block_light: s.block.map(|a| a.to_vec()),
+                })
+                .collect();
+        }
     }
 
     let heightmap_data = if heightmaps.is_empty() {

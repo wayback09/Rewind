@@ -6,6 +6,16 @@ use crate::model::resolve_model;
 use glam::Vec3;
 use std::collections::{HashMap, HashSet};
 
+/// M12: packed per-vertex light: low byte = sky 0..15, next byte = block
+/// 0..15. `LIGHT_MISSING` (all bits set) selects the sun-fallback path in
+/// the shader (entities, unknown chunks) instead of fabricated darkness.
+pub const LIGHT_MISSING: u32 = 0xFFFF_FFFF;
+
+pub fn pack_light(sky: u8, block: u8) -> u32 {
+    debug_assert!(sky < 16 && block < 16);
+    (sky as u32) | ((block as u32) << 8)
+}
+
 #[repr(C)]
 #[derive(Copy, Clone, Debug, bytemuck::Pod, bytemuck::Zeroable)]
 pub struct Vertex {
@@ -16,6 +26,8 @@ pub struct Vertex {
     /// M10: 1 when the source model face has a tintindex (foliage/grass overlay),
     /// 0 otherwise. Consumed by the shader's fallback tint color.
     pub tint: u32,
+    /// M12: packed light from [`pack_light`], or [`LIGHT_MISSING`].
+    pub light: u32,
 }
 
 #[cfg(feature = "window")]
@@ -50,6 +62,11 @@ impl Vertex {
                     shader_location: 4,
                     format: wgpu::VertexFormat::Uint32,
                 },
+                wgpu::VertexAttribute {
+                    offset: 40,
+                    shader_location: 5,
+                    format: wgpu::VertexFormat::Uint32,
+                },
             ],
         }
     }
@@ -68,6 +85,128 @@ impl SectionMesh {
     }
 }
 
+/// M12: per-mesh-build lighting context. Column tops (highest non-air wy
+/// per local column) back the documented above-terrain sky rule; arrays
+/// themselves are read straight from the scene sections (never copied).
+pub struct LightCache {
+    has_skylight: bool,
+    tops: HashMap<(i32, i32), [i32; 256]>,
+}
+
+impl LightCache {
+    /// Empty cache (no chunks, no skylight): every sample is LIGHT_MISSING.
+    /// Used by unit tests that mesh without a scene.
+    pub fn empty() -> Self {
+        Self {
+            has_skylight: false,
+            tops: HashMap::new(),
+        }
+    }
+
+    pub fn for_scene(scene: &scene::Scene) -> Self {
+        let has_skylight = scene.environment.dimension == "minecraft:overworld";
+        let mut tops = HashMap::new();
+        for ((cx, cz), chunk) in &scene.chunks {
+            let mut col = [i32::MIN; 256];
+            for sec in &chunk.sections {
+                for (idx, st) in sec.blocks.iter().enumerate() {
+                    if st.name != "minecraft:air" {
+                        let (lx, ly, lz) = coordinates_local(idx);
+                        let wy = sec.y_base + ly as i32;
+                        let c = &mut col[lz * 16 + lx];
+                        if wy > *c {
+                            *c = wy;
+                        }
+                    }
+                }
+            }
+            tops.insert((*cx, *cz), col);
+        }
+        Self { has_skylight, tops }
+    }
+
+    /// M12: packed light for the cell containing world-space `pos`, sampled
+    /// half a block along `normal` (the air the face looks into). Corner
+    /// positions give vanilla-style smooth vertex gradients at zero extra
+    /// cost (one lookup per vertex). Positions snap to the 1/16 grid first
+    /// so f32 rotation dust (~1e-7) cannot flip a floor() at integer planes.
+    pub fn sample_vertex(
+        &self,
+        scene: Option<&scene::Scene>,
+        pos: [f32; 3],
+        normal: [f32; 3],
+    ) -> u32 {
+        let scene = match scene {
+            Some(s) => s,
+            None => return LIGHT_MISSING,
+        };
+        let snap = |v: f32| (v * 16.0).round() / 16.0;
+        let cx = (snap(pos[0] + normal[0] * 0.5)).floor() as i32;
+        let cy = (snap(pos[1] + normal[1] * 0.5)).floor() as i32;
+        let cz = (snap(pos[2] + normal[2] * 0.5)).floor() as i32;
+        self.sample_cell(Some(scene), cx, cy, cz)
+    }
+
+    /// M12: packed light for one integer cell. Rules (all documented):
+    /// - unknown chunk, or y inside the world but section absent from the
+    ///   scene -> LIGHT_MISSING (shader sun fallback; never fabricated).
+    /// - below chunk min_y -> dark void (0, 0).
+    /// - section present: decoded nibble, else geometric rule — sky 15 iff
+    ///   skylight dimension and the cell is above the column top, else 0;
+    ///   block always 0 when its array is absent.
+    /// - above the chunk height in a skylight dimension -> open sky (15, 0).
+    pub fn sample_cell(&self, scene: Option<&scene::Scene>, wx: i32, wy: i32, wz: i32) -> u32 {
+        let scene = match scene {
+            Some(s) => s,
+            None => return LIGHT_MISSING,
+        };
+        let ccx = wx.div_euclid(16);
+        let ccz = wz.div_euclid(16);
+        let chunk = match scene.chunks.get(&(ccx, ccz)) {
+            Some(c) => c,
+            None => return LIGHT_MISSING,
+        };
+        if wy < chunk.min_y {
+            return pack_light(0, 0);
+        }
+        if wy >= chunk.min_y + chunk.height {
+            return if self.has_skylight {
+                pack_light(15, 0)
+            } else {
+                pack_light(0, 0)
+            };
+        }
+        let sec = match chunk
+            .sections
+            .iter()
+            .find(|s| s.section_y == wy.div_euclid(16))
+        {
+            Some(s) => s,
+            None => return LIGHT_MISSING,
+        };
+        let lx = wx.rem_euclid(16) as usize;
+        let ly = (wy - sec.y_base) as usize;
+        let lz = wz.rem_euclid(16) as usize;
+        let sky = match sec.sky_at_local(lx, ly, lz) {
+            Some(v) => v,
+            None => {
+                let top = self
+                    .tops
+                    .get(&(ccx, ccz))
+                    .map(|c| c[lz * 16 + lx])
+                    .unwrap_or(i32::MIN);
+                if self.has_skylight && wy > top {
+                    15
+                } else {
+                    0
+                }
+            }
+        };
+        let block = sec.block_at_local_light(lx, ly, lz).unwrap_or(0);
+        pack_light(sky, block)
+    }
+}
+
 pub fn generate_section_mesh(
     section: &scene::SceneSection,
     chunk_x: i32,
@@ -75,6 +214,7 @@ pub fn generate_section_mesh(
     scene: &scene::Scene,
     provider: &mut JarAssetProvider,
     texture_set: &mut HashSet<String>,
+    light: &LightCache,
 ) -> Result<SectionMesh, String> {
     if section.blocks.is_empty() {
         return Ok(SectionMesh {
@@ -91,6 +231,7 @@ pub fn generate_section_mesh(
         scene,
         provider,
         texture_set,
+        light,
     )
 }
 
@@ -102,6 +243,7 @@ fn generate_from_blocks(
     scene: &scene::Scene,
     provider: &mut JarAssetProvider,
     texture_set: &mut HashSet<String>,
+    light: &LightCache,
 ) -> Result<SectionMesh, String> {
     let mut vertices = Vec::new();
     let mut indices = Vec::new();
@@ -178,6 +320,8 @@ fn generate_from_blocks(
                         wy as f32,
                         wz as f32,
                         tex_idx,
+                        Some(scene),
+                        light,
                     );
                 }
             }
@@ -377,6 +521,8 @@ fn push_face_quad(
     wy: f32,
     wz: f32,
     tex_idx: u32,
+    scene: Option<&scene::Scene>,
+    light: &LightCache,
 ) {
     let from = elem.from;
     let to = elem.to;
@@ -503,16 +649,25 @@ fn push_face_quad(
     let nudge = if tinted { 0.002 } else { 0.0 };
     let tint = if tinted { 1 } else { 0 };
     for i in 0..4 {
+        let corner = [
+            wx + rotated[i][0] / 16.0,
+            wy + rotated[i][1] / 16.0,
+            wz + rotated[i][2] / 16.0,
+        ];
+        // M12: smooth vertex light sampled from the cell the corner looks
+        // into (nudge excluded: it must not shift the sampled cell).
+        let lv = light.sample_vertex(scene, corner, normal);
         vertices.push(Vertex {
             position: [
-                wx + rotated[i][0] / 16.0 + normal[0] * nudge,
-                wy + rotated[i][1] / 16.0 + normal[1] * nudge,
-                wz + rotated[i][2] / 16.0 + normal[2] * nudge,
+                corner[0] + normal[0] * nudge,
+                corner[1] + normal[1] * nudge,
+                corner[2] + normal[2] * nudge,
             ],
             normal,
             uv: uvs[i],
             tex_index: tex_idx,
             tint,
+            light: lv,
         });
     }
     indices.extend_from_slice(&[base, base + 1, base + 2, base, base + 2, base + 3]);
@@ -585,6 +740,7 @@ mod tests {
         let mut mref = test_mref();
         mref.x = rx;
         mref.y = ry;
+        let light = LightCache::empty();
         push_face_quad(
             &mut vertices,
             &mut indices,
@@ -596,8 +752,12 @@ mod tests {
             0.0,
             0.0,
             0,
+            None,
+            &light,
         );
         assert_eq!(vertices.len(), 4);
+        // M12: no scene -> every sample is LIGHT_MISSING (sun fallback).
+        assert!(vertices.iter().all(|v| v.light == LIGHT_MISSING));
         vertices
     }
 

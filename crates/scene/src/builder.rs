@@ -179,6 +179,7 @@ impl<'a> SceneBuilder<'a> {
         let lighting = SceneLighting {
             status: match canonical.lighting.status.as_str() {
                 "preserved_raw" => LightingStatus::RawPreserved,
+                "decoded" => LightingStatus::Available,
                 "available" => LightingStatus::Available,
                 "unavailable" => LightingStatus::Unavailable,
                 _ => LightingStatus::RawPreserved,
@@ -303,6 +304,10 @@ impl<'a> SceneBuilder<'a> {
             palette_bits: sec.palette_bits,
             palette_size: sec.palette_size,
             has_renderable,
+            // M12: decoded nibble arrays ride along untouched (renderer-only
+            // bytes; never reinterpreted here). None = use documented fallback.
+            sky_light: sec.sky_light.clone(),
+            block_light: sec.block_light.clone(),
         };
         (scene_sec, keys)
     }

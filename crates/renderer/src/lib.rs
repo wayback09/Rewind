@@ -15,7 +15,7 @@ pub mod texture;
 pub mod wgpu_renderer;
 
 pub use asset::{default_jar_path, JarAssetProvider};
-pub use mesh::{SectionMesh, Vertex};
+pub use mesh::{pack_light, LightCache, SectionMesh, Vertex, LIGHT_MISSING};
 
 /// Section key for render cache (also used for CPU mesh indexing)
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -52,6 +52,9 @@ pub fn build_world_meshes(
             .unwrap_or(glam::Vec3::ZERO)
     };
     let radius_chunks = 8; // 8*16 = 128 blocks
+                           // M12: lighting context computed once per mesh build (column tops per
+                           // chunk), then reused for every section — no per-frame recomputation.
+    let light = crate::mesh::LightCache::for_scene(scene);
     for ((cx, cz), chunk) in &scene.chunks {
         if is_large {
             let dx = (*cx as f32 * 16.0 - center.x).abs();
@@ -91,6 +94,7 @@ pub fn build_world_meshes(
                 scene,
                 provider,
                 &mut all_textures,
+                &light,
             ) {
                 Ok(mesh) => {
                     if !mesh.is_empty() {
@@ -152,6 +156,8 @@ pub fn build_world_meshes(
                         uv: [0.0, 0.0],
                         tex_index: tex_idx,
                         tint: 0,
+                        // M12: entities keep the legacy sun path (unchanged look).
+                        light: crate::mesh::LIGHT_MISSING,
                     });
                 }
                 indices.extend_from_slice(&[
@@ -407,15 +413,21 @@ mod tests {
             palette_bits: 1,
             palette_size: 1,
             has_renderable: true,
+            // M12: no decoded light here; empty scene -> all verts LIGHT_MISSING.
+            sky_light: None,
+            block_light: None,
         };
         let mut textures = std::collections::HashSet::new();
+        let empty = empty_scene();
+        let light = crate::mesh::LightCache::for_scene(&empty);
         let mesh = crate::mesh::generate_section_mesh(
             &sec,
             0,
             0,
-            &empty_scene(),
+            &empty,
             &mut prov,
             &mut textures,
+            &light,
         )
         .unwrap();
         assert!(!mesh.vertices.is_empty());
@@ -624,6 +636,316 @@ mod tests {
         }
     }
 
+    fn air() -> replay_model::CanonicalBlockState {
+        state("minecraft:air", &[])
+    }
+
+    fn light_section(
+        section_y: i32,
+        blocks: Vec<replay_model::CanonicalBlockState>,
+        sky: Option<Vec<u8>>,
+        block: Option<Vec<u8>>,
+    ) -> scene::SceneSection {
+        assert_eq!(blocks.len(), 4096);
+        assert!(sky.as_ref().map(|a| a.len() == 2048).unwrap_or(true));
+        assert!(block.as_ref().map(|a| a.len() == 2048).unwrap_or(true));
+        scene::SceneSection {
+            section_y,
+            y_base: section_y * 16,
+            is_empty: false,
+            blocks,
+            non_empty_block_count: 4096,
+            palette_bits: 1,
+            palette_size: 1,
+            has_renderable: true,
+            sky_light: sky,
+            block_light: block,
+        }
+    }
+
+    /// M12: minimal scene holding the given chunks (each a list of sections).
+    fn scene_with_chunks(
+        dim: &str,
+        chunks: Vec<((i32, i32), Vec<scene::SceneSection>)>,
+    ) -> scene::Scene {
+        let mut s = empty_scene();
+        s.environment.dimension = dim.into();
+        for ((cx, cz), sections) in chunks {
+            let chunk = scene::SceneChunk {
+                x: cx,
+                z: cz,
+                min_y: -64,
+                height: 384,
+                section_count: sections.len(),
+                sections,
+                block_entities: vec![],
+                lighting: scene::SceneLighting {
+                    status: scene::LightingStatus::Available,
+                    raw_bytes_len: None,
+                    per_section: vec![],
+                },
+                biome: scene::SceneBiomeData {
+                    status: scene::BiomeStatus::RawPreserved,
+                    raw_bytes_len: None,
+                    note: "test".into(),
+                },
+                non_empty_count: 4096,
+            };
+            s.chunks.insert((cx, cz), chunk);
+        }
+        s
+    }
+
+    fn stone_slab_y0() -> Vec<replay_model::CanonicalBlockState> {
+        let stone = state("minecraft:stone", &[]);
+        let mut blocks = vec![air(); 4096];
+        for z in 0..16 {
+            for x in 0..16 {
+                blocks[(0 * 16 + z) * 16 + x] = stone.clone();
+            }
+        }
+        blocks
+    }
+
+    fn mesh_one_section(
+        scene: &scene::Scene,
+        sec: &scene::SceneSection,
+        cx: i32,
+        cz: i32,
+        prov: &mut crate::asset::JarAssetProvider,
+    ) -> crate::mesh::SectionMesh {
+        let light = crate::mesh::LightCache::for_scene(scene);
+        let mut textures = std::collections::HashSet::new();
+        crate::mesh::generate_section_mesh(sec, cx, cz, scene, prov, &mut textures, &light).unwrap()
+    }
+
+    fn jar_provider() -> Option<crate::asset::JarAssetProvider> {
+        let jar = crate::asset::default_jar_path()?;
+        Some(crate::asset::JarAssetProvider::from_jar(jar).unwrap())
+    }
+
+    /// M12: decoded arrays are sampled per vertex. Stone slab at y=0 with
+    /// sky=all-15 and block=all-14: every above-void vert reads pack(15,14);
+    /// bottom-face verts (sampling y=-1, section absent) are LIGHT_MISSING.
+    #[test]
+    fn light_arrays_sampled_per_vertex() {
+        let Some(mut prov) = jar_provider() else {
+            return;
+        };
+        let sec = light_section(
+            0,
+            stone_slab_y0(),
+            Some(vec![0xFF; 2048]),
+            Some(vec![0xEE; 2048]),
+        );
+        let scene = scene_with_chunks("minecraft:overworld", vec![((0, 0), vec![sec.clone()])]);
+        let mesh = mesh_one_section(&scene, &sec, 0, 0, &mut prov);
+        assert!(!mesh.vertices.is_empty());
+        let want = crate::mesh::pack_light(15, 14);
+        let mut lit = 0;
+        let mut missing = 0;
+        for v in &mesh.vertices {
+            if v.normal[1] < -0.5 {
+                // Bottom face samples y=-1 (section absent from scene).
+                assert_eq!(
+                    v.light,
+                    crate::mesh::LIGHT_MISSING,
+                    "bottom verts sample absent section"
+                );
+                missing += 1;
+            } else if (v.position[0] < 0.01 && v.normal[0] < -0.5)
+                || (v.position[0] > 15.99 && v.normal[0] > -0.5)
+                || (v.position[2] < 0.01 && v.normal[2] < -0.5)
+                || (v.position[2] > 15.99 && v.normal[2] > -0.5)
+            {
+                // The sampled cell's floor() falls outside chunk (0,0)
+                // into an absent neighbor (edge and diagonal corners) ->
+                // documented sun-fallback fringe.
+                assert_eq!(v.light, crate::mesh::LIGHT_MISSING, "edge fringe");
+                missing += 1;
+            } else {
+                assert_eq!(v.light, want, "lit vert must read pack(15,14)");
+                lit += 1;
+            }
+        }
+        assert!(lit > 0 && missing > 0);
+    }
+
+    /// M12: geometric rule with no arrays — overworld stone roof (x/z in
+    /// 4..11, y=5..6), pillar A (5,5, y 0..2) under the roof, pillar B
+    /// (12,12, y 0..2) in the open. Freestanding sides see open sky (a
+    /// 1-wide pillar's neighbors are genuinely sky-lit air columns); the
+    /// roof shadows pillar A's top and sides to 0. Per-corner smooth blend.
+    #[test]
+    fn light_geometric_rule_no_arrays() {
+        let Some(mut prov) = jar_provider() else {
+            return;
+        };
+        let stone = state("minecraft:stone", &[]);
+        let mut blocks = vec![air(); 4096];
+        for z in 4..12 {
+            for x in 4..12 {
+                for ly in 5..7 {
+                    blocks[(ly * 16 + z) * 16 + x] = stone.clone();
+                }
+            }
+        }
+        for ly in 0..3 {
+            blocks[(ly * 16 + 5) * 16 + 5] = stone.clone(); // pillar A (roofed)
+            blocks[(ly * 16 + 12) * 16 + 12] = stone.clone(); // pillar B (open)
+        }
+        let sec = light_section(0, blocks, None, None);
+        let scene = scene_with_chunks("minecraft:overworld", vec![((0, 0), vec![sec.clone()])]);
+        let mesh = mesh_one_section(&scene, &sec, 0, 0, &mut prov);
+        assert!(!mesh.vertices.is_empty());
+        let in_a = |p: &[f32; 3]| p[0] >= 4.99 && p[0] <= 6.01 && p[2] >= 4.99 && p[2] <= 6.01;
+        let in_b = |p: &[f32; 3]| p[0] >= 11.99 && p[0] <= 13.01 && p[2] >= 11.99 && p[2] <= 13.01;
+        let mut a_top = 0;
+        let mut b_top = 0;
+        let mut shade = 0;
+        for v in &mesh.vertices {
+            if v.normal[1] < -0.5 && v.position[1] < 0.5 {
+                // Pillar bottoms sample y=-1 (section absent): missing.
+                assert_eq!(v.light, crate::mesh::LIGHT_MISSING, "void below");
+            } else if in_a(&v.position) && v.position[1] < 4.0 {
+                // Pillar A under the roof: top (y=3, column top 6) and all
+                // sides sample roofed cells -> dark.
+                assert_eq!(v.light, crate::mesh::pack_light(0, 0), "roof shadow");
+                if v.normal[1] > 0.5 {
+                    a_top += 1;
+                } else {
+                    shade += 1;
+                }
+            } else if in_b(&v.position) && v.position[1] < 4.0 {
+                // Pillar B in the open: top and sides read open sky.
+                assert_eq!(v.light, crate::mesh::pack_light(15, 0), "open pillar");
+                if v.normal[1] > 0.5 {
+                    b_top += 1;
+                }
+            } else if v.position[1] > 6.5 {
+                // Roof top samples open sky above the column tops.
+                assert_eq!(v.light, crate::mesh::pack_light(15, 0), "roof top");
+            } else if v.normal[1] < -0.5
+                && (v.position[1] - 5.0).abs() < 1e-6
+                && !in_b(&v.position)
+                && v.position[0] <= 11.99
+                && v.position[2] <= 11.99
+            {
+                // Roof underside samples roofed air below the roof -> dark.
+                // Edge strip (x/z=12 over open columns) samples open sky
+                // instead -> 15, correct, left unasserted.
+                assert_eq!(v.light, crate::mesh::pack_light(0, 0), "roof underside");
+                shade += 1;
+            }
+            // Roof sides (open neighbors) intentionally unasserted beyond
+            // not panicking; they read open sky.
+        }
+        assert_eq!(a_top, 4, "pillar A top shadowed");
+        assert_eq!(b_top, 4, "pillar B top sunlit");
+        assert!(shade > 0);
+    }
+
+    /// M12: chunk boundary + negative section Y. Slab at y=-64 in chunk
+    /// (0,0) without arrays; chunk (1,0) section -4 carries sky=all-10.
+    /// East faces at the x=16 plane must read the NEIGHBOR chunk (10, not
+    /// 0 and not a wrong-chunk value); bottom faces read dark void (0,0).
+    #[test]
+    fn light_chunk_boundary_and_negative_y() {
+        let Some(mut prov) = jar_provider() else {
+            return;
+        };
+        // stone_slab_y0 puts stone at ly=0 -> y=-64 in section -4.
+        let sec0 = light_section(-4, stone_slab_y0(), None, None);
+        // Neighbor chunk carries light arrays but no geometry (all air), so
+        // chunk (0,0)'s east faces survive culling and sample across.
+        let sec1 = light_section(-4, vec![air(); 4096], Some(vec![0xAA; 2048]), None);
+        let scene = scene_with_chunks(
+            "minecraft:overworld",
+            vec![((0, 0), vec![sec0.clone()]), ((1, 0), vec![sec1.clone()])],
+        );
+        let mesh = mesh_one_section(&scene, &sec0, 0, 0, &mut prov);
+        assert!(!mesh.vertices.is_empty());
+        let mut across = 0;
+        let mut void_below = 0;
+        for v in &mesh.vertices {
+            if v.normal[1] < -0.5 && (v.position[2] - 16.0).abs() >= 1e-6 {
+                // Bottom face samples y=-65: below chunk min_y -> dark void.
+                // (z=16 corners sample diagonal chunk (0,1)/(1,1), absent ->
+                // missing, unasserted.)
+                assert_eq!(
+                    v.light,
+                    crate::mesh::pack_light(0, 0),
+                    "below-minY void must be dark, not missing"
+                );
+                void_below += 1;
+            } else if (v.position[0] - 16.0).abs() < 1e-6
+                && (v.position[2] - 16.0).abs() >= 1e-6
+                && v.normal[2].abs() < 0.5
+            {
+                // East plane, excluding the z=16 diagonal corners (those
+                // sample diagonal chunk (1,1), absent -> missing, unasserted)
+                // and north/south faces (their x=16 corners sample z=-1/+17
+                // chunks, absent -> missing, unasserted).
+                assert_eq!(
+                    v.light,
+                    crate::mesh::pack_light(10, 0),
+                    "boundary vert must read neighbor chunk"
+                );
+                across += 1;
+            }
+        }
+        assert!(across > 0 && void_below > 0);
+    }
+
+    /// M12: nether has no skylight — the above-terrain rule must yield sky 0,
+    /// never 15, even over bare columns.
+    #[test]
+    fn light_nether_no_sky_fallback() {
+        let Some(mut prov) = jar_provider() else {
+            return;
+        };
+        let stone = state("minecraft:stone", &[]);
+        let mut blocks = vec![air(); 4096];
+        blocks[(0 * 16 + 5) * 16 + 5] = stone.clone();
+        let sec = light_section(0, blocks, None, None);
+        let scene = scene_with_chunks("minecraft:the_nether", vec![((0, 0), vec![sec.clone()])]);
+        let mesh = mesh_one_section(&scene, &sec, 0, 0, &mut prov);
+        assert!(!mesh.vertices.is_empty());
+        for v in &mesh.vertices {
+            if v.light != crate::mesh::LIGHT_MISSING {
+                let sky = (v.light & 0xFF) as u8;
+                assert_eq!(sky, 0, "nether sky must be 0, got {sky}");
+            }
+        }
+        // The top face (open column) must be present and dark, not missing.
+        assert!(mesh.vertices.iter().any(
+            |v| (v.position[1] - 1.0).abs() < 1e-6 && v.light == crate::mesh::pack_light(0, 0)
+        ));
+    }
+
+    /// M12: determinism — same scene meshed twice yields byte-identical
+    /// vertices including packed light.
+    #[test]
+    fn light_determinism() {
+        let Some(mut prov) = jar_provider() else {
+            return;
+        };
+        let sec = light_section(
+            0,
+            stone_slab_y0(),
+            Some(vec![0xFF; 2048]),
+            Some(vec![0x1B; 2048]),
+        );
+        let scene = scene_with_chunks("minecraft:overworld", vec![((0, 0), vec![sec.clone()])]);
+        let m1 = mesh_one_section(&scene, &sec, 0, 0, &mut prov);
+        let m2 = mesh_one_section(&scene, &sec, 0, 0, &mut prov);
+        let b1: &[u8] = bytemuck::cast_slice(&m1.vertices);
+        let b2: &[u8] = bytemuck::cast_slice(&m2.vertices);
+        assert_eq!(m1.vertices.len(), m2.vertices.len());
+        assert!(!m1.vertices.is_empty());
+        assert_eq!(b1, b2);
+    }
+
     #[test]
     fn mesh_determinism() {
         let Some(jar) = crate::asset::default_jar_path() else {
@@ -645,6 +967,8 @@ mod tests {
             palette_bits: 1,
             palette_size: 1,
             has_renderable: true,
+            sky_light: None,
+            block_light: None,
         };
         let chunk = scene::SceneChunk {
             x: 0,

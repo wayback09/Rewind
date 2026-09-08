@@ -10,6 +10,7 @@
 
 pub mod block_entity_registry;
 pub mod chunk;
+pub mod light;
 pub mod palette;
 pub mod registry;
 pub mod snapshot;

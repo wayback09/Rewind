@@ -53,6 +53,12 @@ pub struct SceneSection {
     pub palette_size: usize,
     /// Does this section contain any non-air renderable block?
     pub has_renderable: bool,
+    /// M12: sky light nibbles (2048 bytes, 4096 x 4 bits) if decoded, else
+    /// None. Same cell convention as `blocks`: `idx=(ly*16+lz)*16+lx`,
+    /// even idx = low nibble first (see minecraft-version `light` module).
+    pub sky_light: Option<Vec<u8>>,
+    /// M12: block light nibbles (2048 bytes) if decoded, else None.
+    pub block_light: Option<Vec<u8>>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -133,6 +139,27 @@ impl SceneSection {
         }
         let idx = (ly * 16 + lz) * 16 + lx;
         self.blocks.get(idx)
+    }
+
+    /// M12: nibble lookup in a 2048-byte light array with the canonical cell
+    /// convention (`idx=(ly*16+lz)*16+lx`, even idx = low nibble first).
+    fn nibble_at(arr: &[u8], lx: usize, ly: usize, lz: usize) -> Option<u8> {
+        if lx >= 16 || ly >= 16 || lz >= 16 || arr.len() != 2048 {
+            return None;
+        }
+        let idx = (ly * 16 + lz) * 16 + lx;
+        let b = arr[idx / 2];
+        Some(if idx % 2 == 0 { b & 0x0F } else { b >> 4 })
+    }
+
+    /// M12: sky light 0..15 at a local cell, or None if not decoded.
+    pub fn sky_at_local(&self, lx: usize, ly: usize, lz: usize) -> Option<u8> {
+        Self::nibble_at(self.sky_light.as_ref()?, lx, ly, lz)
+    }
+
+    /// M12: block light 0..15 at a local cell, or None if not decoded.
+    pub fn block_at_local_light(&self, lx: usize, ly: usize, lz: usize) -> Option<u8> {
+        Self::nibble_at(self.block_light.as_ref()?, lx, ly, lz)
     }
 }
 
